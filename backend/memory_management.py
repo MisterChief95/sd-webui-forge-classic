@@ -319,6 +319,33 @@ if "rtx" in torch_device_name.lower():
 
 current_loaded_models: list["LoadedModel"] = []
 
+_last_free_memory = {}
+_memory_state_changed = True
+
+
+def invalidate_memory_cache():
+    global _memory_state_changed
+    _memory_state_changed = True
+
+
+def get_cached_free_memory(dev=None, torch_free_too=False):
+    global _last_free_memory, _memory_state_changed
+    
+    if dev is None:
+        dev = get_torch_device()
+    
+    dev_str = str(dev)
+    cache_key = (dev_str, torch_free_too)
+    
+    if not _memory_state_changed and cache_key in _last_free_memory:
+        return _last_free_memory[cache_key]
+    
+    result = get_free_memory(dev, torch_free_too)
+    _last_free_memory[cache_key] = result
+    _memory_state_changed = False
+    
+    return result
+
 
 def state_dict_size(sd, exclude_device=None):
     module_mem = 0
@@ -579,9 +606,19 @@ def unload_model_clones(model):
 
     if len(to_unload) > 0:
         soft_empty_cache()
+        invalidate_memory_cache()
 
 
-def free_memory(memory_required, device, keep_loaded=[], free_all=False):
+def free_memory(memory_required, device, keep_loaded=[], free_all=False, cache_only=False):
+    if cache_only:
+        import gc
+        print("Cleanup cache memory ... ", end="")
+        soft_empty_cache()
+        gc.collect()
+        invalidate_memory_cache()
+        print("Done.")
+        return
+        
     if free_all:
         memory_required = 1e30
         print(f"[Unload] Trying to free all memory for {device} with {len(keep_loaded)} models keep loaded ... ", end="")
@@ -606,11 +643,13 @@ def free_memory(memory_required, device, keep_loaded=[], free_all=False):
 
     if unloaded_model:
         soft_empty_cache()
+        invalidate_memory_cache()
     else:
         if vram_state != VRAMState.HIGH_VRAM:
             mem_free_total, mem_free_torch = get_free_memory(device, torch_free_too=True)
             if mem_free_torch > mem_free_total * 0.25:
                 soft_empty_cache()
+                invalidate_memory_cache()
 
     print("Done.")
 
@@ -643,9 +682,23 @@ def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
 
     if len(models_to_load) == 0:
         devs = set(map(lambda a: a.device, models_already_loaded))
-        for d in devs:
-            if d != torch.device("cpu"):
-                free_memory(memory_to_free, d, models_already_loaded)
+        skip_cleanup = True
+        
+        # Check if we have sufficient memory without cleanup
+        if not _memory_state_changed:
+            for d in devs:
+                if d != torch.device("cpu"):
+                    cached_free_mem = get_cached_free_memory(d)
+                    if cached_free_mem < memory_to_free:
+                        skip_cleanup = False
+                        break
+        else:
+            skip_cleanup = False
+            
+        if not skip_cleanup:
+            for d in devs:
+                if d != torch.device("cpu"):
+                    free_memory(memory_to_free, d, models_already_loaded)
 
         if (moving_time := time.perf_counter() - execution_start_time) > 0.1:
             print(f"Memory cleanup has taken {moving_time:.2f} seconds")
@@ -683,7 +736,7 @@ def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
         if vram_set_state in (VRAMState.LOW_VRAM, VRAMState.NORMAL_VRAM):
             model_require = loaded_model.exclusive_memory
             previously_loaded = loaded_model.inclusive_memory
-            current_free_mem = get_free_memory(torch_dev)
+            current_free_mem = get_cached_free_memory(torch_dev)
             estimated_remaining_memory = current_free_mem - model_require - memory_for_inference
 
             print(f"[Memory Management] Target: {loaded_model.model.model.__class__.__name__}, Free GPU: {current_free_mem / (1024 * 1024):.2f} MB, Model Require: {model_require / (1024 * 1024):.2f} MB, Previously Loaded: {previously_loaded / (1024 * 1024):.2f} MB, Inference Require: {memory_for_inference / (1024 * 1024):.2f} MB, Remaining: {estimated_remaining_memory / (1024 * 1024):.2f} MB, ", end="")
@@ -697,6 +750,7 @@ def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
 
         loaded_model.model_load(cpu_swap_memory)
         current_loaded_models.insert(0, loaded_model)
+        invalidate_memory_cache()
 
     moving_time = time.perf_counter() - execution_start_time
     print(f"Moving model(s) has taken {moving_time:.2f} seconds")
@@ -715,6 +769,7 @@ def cleanup_models():
 
     if len(to_delete) > 0:
         soft_empty_cache()
+        invalidate_memory_cache()
 
 
 def dtype_size(dtype):
@@ -749,8 +804,8 @@ def unet_initial_load_device(parameters, dtype):
 
     model_size = dtype_size(dtype) * parameters
 
-    mem_dev = get_free_memory(torch_dev)
-    mem_cpu = get_free_memory(cpu_dev)
+    mem_dev = get_cached_free_memory(torch_dev)
+    mem_cpu = get_cached_free_memory(cpu_dev)
     if mem_dev > mem_cpu and model_size < mem_dev:
         return torch_dev
     else:
@@ -1137,7 +1192,7 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
         if x in props.name.lower():
             if manual_cast:
                 # For storage dtype
-                free_model_memory = get_free_memory() * 0.9 - minimum_inference_memory()
+                free_model_memory = get_cached_free_memory() * 0.9 - minimum_inference_memory()
                 if (not prioritize_performance) or model_params * 4 > free_model_memory:
                     return True
             else:
@@ -1192,7 +1247,7 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
         # So in this case bf16 should only be used as storage dtype
         if manual_cast:
             # For storage dtype
-            free_model_memory = get_free_memory() * 0.9 - minimum_inference_memory()
+            free_model_memory = get_cached_free_memory() * 0.9 - minimum_inference_memory()
             if (not prioritize_performance) or model_params * 4 > free_model_memory:
                 return True
 
