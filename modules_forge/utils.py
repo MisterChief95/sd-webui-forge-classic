@@ -11,21 +11,21 @@ from backend import memory_management
 
 def prepare_free_memory(aggressive=False):
     """
-    Prepare memory for operations by cleaning up cached memory or unloading models.
+    Prepare memory for operations by cleaning up inference memory or unloading models.
     
     Args:
         aggressive (bool): If True, unloads all models for maximum memory cleanup.
-                          If False, only performs cache cleanup (faster, less disruptive).
+                          If False, only clears temporary inference memory from last generation (fast).
                           
-    Note: The non-aggressive mode only clears memory caches rather than freeing 
-          minimum_inference_memory() as in previous versions, for better performance.
+    Note: The non-aggressive mode clears inference memory caches rather than unloading 
+          models, making it suitable for cleanup between generations.
     """
     if aggressive:
         memory_management.unload_all_models()
         print("Cleanup all memory...")
         return
 
-    memory_management.free_memory(memory_required=0, device=memory_management.get_torch_device(), cache_only=True)
+    memory_management.free_memory(memory_required=0, device=memory_management.get_torch_device(), for_inference=True)
 
 
 def apply_circular_forge(model, tiling_enabled=False):

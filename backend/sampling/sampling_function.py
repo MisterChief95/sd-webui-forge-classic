@@ -404,4 +404,7 @@ def sampling_cleanup(unet):
     for cnet in unet.list_controlnets():
         cnet.cleanup()
     cleanup_cache()
+    
+    # Clean up inference memory after generation
+    memory_management.free_memory(memory_required=0, device=memory_management.get_torch_device(), for_inference=True)
     return
