@@ -299,13 +299,11 @@ def apply_token_merging(sd_model, token_merging_ratio):
         from backend.misc.tomesd import TomePatcher
 
         sd_model.forge_objects.unet = TomePatcher.patch(model=sd_model.forge_objects.unet, ratio=token_merging_ratio)
-        print(f"token_merging_ratio = {token_merging_ratio}")
 
     if opts.scaling_factor > 1.0 and sd_model.model_config.model_type.name == "EPS":
         from backend.misc.eps import EpsilonScaling
 
         sd_model.forge_objects.unet = EpsilonScaling.patch(model=sd_model.forge_objects.unet, scaling_factor=opts.scaling_factor)
-        print(f"eps_scaling_factor = {opts.scaling_factor}")
 
 
 @torch.inference_mode()

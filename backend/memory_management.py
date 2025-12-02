@@ -719,7 +719,9 @@ class LoadedModel:
             self.model.model_patches_to(self.model.offload_device)
 
     def __eq__(self, other: "LoadedModel"):
-        return self.model is other.model
+        # Compare the underlying torch model, not the ModelPatcher wrapper
+        # This handles cases where new ModelPatcher instances wrap the same model
+        return self.model.model is other.model.model
 
 
 WINDOWS = any(platform.win32_ver())
