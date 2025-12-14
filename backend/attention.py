@@ -159,7 +159,8 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
     r1 = torch.zeros(q.shape[0], q.shape[1], v.shape[2], device=q.device, dtype=q.dtype)
 
-    mem_free_total = memory_management.get_free_memory(q.device)
+    mem_info = memory_management.get_free_memory(q.device)
+    mem_free_total = mem_info.mem_free_total
 
     if attn_precision == torch.float32:
         element_size = 4
@@ -474,7 +475,8 @@ def slice_attention_single_head_spatial(q, k, v):
     r1 = torch.zeros_like(k, device=q.device)
     scale = int(q.shape[-1]) ** (-0.5)
 
-    mem_free_total = memory_management.get_free_memory(q.device)
+    mem_info = memory_management.get_free_memory(q.device)
+    mem_free_total = mem_info.mem_free_total
 
     tensor_size = q.shape[0] * q.shape[1] * k.shape[2] * q.element_size()
     modifier = 3 if q.element_size() == 2 else 2.5

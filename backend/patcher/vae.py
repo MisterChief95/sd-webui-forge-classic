@@ -201,8 +201,8 @@ class VAE:
         try:
             memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
             memory_management.load_models_gpu([self.patcher], memory_required=memory_used)
-            free_memory = memory_management.get_free_memory(self.device)
-            batch_number = int(free_memory / memory_used)
+            mem_info = memory_management.get_free_memory(self.device)
+            batch_number = int(mem_info.mem_free_total / memory_used)
             batch_number = max(1, batch_number)
 
             for x in range(0, samples_in.shape[0], batch_number):
@@ -247,8 +247,8 @@ class VAE:
         try:
             memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
             memory_management.load_models_gpu([self.patcher], memory_required=memory_used)
-            free_memory = memory_management.get_free_memory(self.device)
-            batch_number = int(free_memory / max(1, memory_used))
+            mem_info = memory_management.get_free_memory(self.device)
+            batch_number = int(mem_info.mem_free_total / max(1, memory_used))
             batch_number = max(1, batch_number)
             samples = None
             for x in range(0, pixel_samples.shape[0], batch_number):

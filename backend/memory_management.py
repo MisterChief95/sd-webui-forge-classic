@@ -111,6 +111,23 @@ class MemoryInfo:
     device: torch.device
 
 
+# Default MemoryInfo representing zero/no memory available
+ZERO_MEMORY_INFO = MemoryInfo(
+    mem_total=0,
+    mem_total_torch=0,
+    mem_free_total=0,
+    mem_free_torch=0,
+    device=cpu
+)
+
+
+@dataclass
+class CachedMemoryEntry:
+    """Wrapper for cached MemoryInfo with validity flag"""
+    memory_info: MemoryInfo
+    valid: bool = True
+
+
 def _get_memory_info(dev=None):
     """
     Internal function to get comprehensive memory information for a device.
@@ -377,57 +394,55 @@ class MemoryCache:
     """Cache for memory information to reduce redundant GPU memory queries"""
 
     def __init__(self):
-        self.cache = {}  # device_str -> {"valid": bool, "mem_free_total": int, "mem_free_torch": int, "mem_total": int}
+        self.cache: dict[str, CachedMemoryEntry] = {}
 
     @staticmethod
-    def _device_key(device):
+    def _device_key(device: torch.device) -> str:
         """Convert device to string key for cache"""
         return str(device)
 
-    def get_cached_memory(self, device):
-        """Get cached memory info if still valid, returns (mem_free_total, mem_free_torch, mem_total) or None"""
+    def get_cached_memory(self, device: torch.device) -> MemoryInfo | None:
+        """Get cached MemoryInfo if still valid, returns MemoryInfo or None"""
         device_key = self._device_key(device)
 
         if device_key in self.cache:
             cache_entry = self.cache[device_key]
-            if cache_entry.get('valid', False):
-                return cache_entry['mem_free_total'], cache_entry['mem_free_torch'], cache_entry['mem_total']
+            if cache_entry.valid:
+                return cache_entry.memory_info
 
         return None
 
-    def update_cache(self, device, mem_free_total, mem_free_torch=None, mem_total=None):
-        """Update cache with new memory information"""
-        device_key = self._device_key(device)
+    def update_cache(self, memory_info: MemoryInfo) -> None:
+        """Update cache with new MemoryInfo"""
+        device_key = self._device_key(memory_info.device)
+        self.cache[device_key] = CachedMemoryEntry(memory_info=memory_info, valid=True)
 
-        if mem_free_torch is None:
-            mem_free_torch = mem_free_total
-        if mem_total is None:
-            mem_total = mem_free_total
-
-        self.cache[device_key] = {
-            "valid": True,
-            "mem_free_total": mem_free_total,
-            "mem_free_torch": mem_free_torch,
-            "mem_total": mem_total
-        }
-
-    def invalidate_cache(self, device=None):
+    def invalidate_cache(self, device: torch.device | None = None) -> None:
         """Invalidate cache for specific device or all devices if device is None"""
         if device is not None:
             device_key = self._device_key(device)
             if device_key in self.cache:
-                self.cache[device_key]["valid"] = False
+                # Replace with invalidated entry
+                old_entry = self.cache[device_key]
+                self.cache[device_key] = CachedMemoryEntry(
+                    memory_info=old_entry.memory_info,
+                    valid=False
+                )
         else:
-            for cache_entry in self.cache.values():
-                cache_entry["valid"] = False
+            for device_key in self.cache:
+                old_entry = self.cache[device_key]
+                self.cache[device_key] = CachedMemoryEntry(
+                    memory_info=old_entry.memory_info,
+                    valid=False
+                )
 
-    def get_cache_status(self):
+    def get_cache_status(self) -> dict[str, dict[str, bool | float]]:
         """Debug method to check cache status"""
         status = {}
         for device_key, cache_entry in self.cache.items():
             status[device_key] = {
-                "valid": cache_entry.get("valid", False),
-                "mem_free_mb": cache_entry["mem_free_total"] / (1024 * 1024)
+                "valid": cache_entry.valid,
+                "mem_free_mb": cache_entry.memory_info.mem_free_total / (1024 * 1024)
             }
         return status
 
@@ -487,7 +502,107 @@ class ModelComponentCache:
 # Global component cache instance
 _component_cache = ModelComponentCache()
 
-current_loaded_models: list["LoadedModel"] = []
+
+class LoadedModelsManager:
+    """Manages loaded models organized by type for efficient tracking and access"""
+
+    def __init__(self):
+        self._models: dict[str, list["LoadedModel"]] = {}
+
+    @staticmethod
+    def _get_model_type_key(model) -> str:
+        """Get the model type key for organizing loaded models by type"""
+        if hasattr(model, 'model') and hasattr(model.model, '__class__'):
+            return model.model.__class__.__name__
+        return "Unknown"
+
+    def add(self, loaded_model: "LoadedModel"):
+        """Add a loaded model to the appropriate type list (at the front)"""
+        model_type = self._get_model_type_key(loaded_model.model)
+        if model_type not in self._models:
+            self._models[model_type] = []
+        self._models[model_type].insert(0, loaded_model)
+
+    def remove(self, loaded_model: "LoadedModel") -> bool:
+        """Remove a loaded model from its type list. Returns True if found and removed."""
+        model_type = self._get_model_type_key(loaded_model.model)
+        if model_type in self._models and loaded_model in self._models[model_type]:
+            self._models[model_type].remove(loaded_model)
+            if not self._models[model_type]:
+                del self._models[model_type]
+            return True
+        return False
+
+    def find(self, loaded_model: "LoadedModel") -> tuple[str, int] | None:
+        """Find a loaded model and return (model_type, index) or None if not found"""
+        model_type = self._get_model_type_key(loaded_model.model)
+        if model_type in self._models:
+            try:
+                index = self._models[model_type].index(loaded_model)
+                return (model_type, index)
+            except ValueError:
+                pass
+        return None
+
+    def move_to_front(self, model_type: str, index: int) -> "LoadedModel | None":
+        """Move a model to the front of its type list and return it"""
+        if model_type in self._models and index < len(self._models[model_type]):
+            loaded_model = self._models[model_type].pop(index)
+            self._models[model_type].insert(0, loaded_model)
+            return loaded_model
+        return None
+
+    def get_all(self) -> list["LoadedModel"]:
+        """Get a flat list of all loaded models across all types"""
+        all_models = []
+        for model_list in self._models.values():
+            all_models.extend(model_list)
+        return all_models
+
+    def iter_by_type(self):
+        """Iterate through (model_type, model_list) pairs"""
+        return self._models.items()
+
+    def get_type_list(self, model_type: str) -> list["LoadedModel"]:
+        """Get the list of models for a specific type"""
+        return self._models.get(model_type, [])
+
+    def pop_from_type(self, model_type: str, index: int) -> "LoadedModel | None":
+        """Remove and return a model from a specific type list"""
+        if model_type in self._models and index < len(self._models[model_type]):
+            model = self._models[model_type].pop(index)
+            if not self._models[model_type]:
+                del self._models[model_type]
+            return model
+        return None
+
+    def total_count(self) -> int:
+        """Get total number of loaded models across all types"""
+        return sum(len(models_list) for models_list in self._models.values())
+
+    def type_count(self) -> int:
+        """Get number of different model types currently loaded"""
+        return len(self._models)
+
+    def print_summary(self):
+        """Print a formatted summary of currently loaded models grouped by type"""
+        if not self._models:
+            print("[Memory Management] No models currently loaded")
+            return
+
+        total_count = self.total_count()
+        print(f"[Memory Management] Loaded models summary: {total_count} total across {self.type_count()} type(s)")
+
+        for model_type, models_list in self._models.items():
+            print(f"  [{model_type}]: {len(models_list)} model(s)")
+            for i, loaded_model in enumerate(models_list):
+                lora_count = len(loaded_model.model.lora_patches) if hasattr(loaded_model.model, 'lora_patches') else 0
+                device_str = str(loaded_model.device)
+                print(f"    {i}. Device: {device_str}, LoRAs: {lora_count}")
+
+
+# Global loaded models manager instance
+current_loaded_models = LoadedModelsManager()
 
 
 def state_dict_size(sd, exclude_device=None):
@@ -560,7 +675,7 @@ def bake_gguf_model(model):
     return model
 
 
-def module_size(module: torch.nn.Module, exclude_device: torch.device = None, include_device: torch.device = None, return_split=False):
+def module_size(module: torch.nn.Module, exclude_device: torch.device | None = None, include_device: torch.device | None = None, return_split=False):
     module_mem = 0
     weight_mem = 0
     weight_patterns = "weight"
@@ -718,10 +833,18 @@ class LoadedModel:
             self.model.forge_unpatch_model(self.model.offload_device)
             self.model.model_patches_to(self.model.offload_device)
 
-    def __eq__(self, other: "LoadedModel"):
+    def __eq__(self: "LoadedModel", other: object) -> bool:
         # Compare the underlying torch model, not the ModelPatcher wrapper
         # This handles cases where new ModelPatcher instances wrap the same model
-        return self.model.model is other.model.model
+        # Also compare LoRA patches to ensure models with different LoRAs are reloaded
+        if not isinstance(other, LoadedModel):
+            return False
+        if self.model.model is not other.model.model:
+            return False
+        # Compare LoRA patch configurations by checking the keys (which include filename, strength, and online_mode)
+        self_keys = set(self.model.lora_patches.keys())
+        other_keys = set(other.model.lora_patches.keys())
+        return self_keys == other_keys
 
 
 WINDOWS = any(platform.win32_ver())
@@ -742,12 +865,16 @@ def minimum_inference_memory():
 
 
 def unload_model_clones(model):
-    to_unload = [i for i in range(len(current_loaded_models)) if model.is_clone(current_loaded_models[i].model)]
+    to_unload = []
+    for _, model_list in current_loaded_models.iter_by_type():
+        for loaded_model in model_list:
+            if model.is_clone(loaded_model.model):
+                to_unload.append(loaded_model)
 
-    for i in reversed(to_unload):
-        m = current_loaded_models.pop(i)
-        m.model_unload(avoid_model_moving=True)
-        del m
+    for loaded_model in to_unload:
+        current_loaded_models.remove(loaded_model)
+        loaded_model.model_unload(avoid_model_moving=True)
+        del loaded_model
 
     if len(to_unload) > 0:
         soft_empty_cache()
@@ -760,9 +887,15 @@ def free_memory(memory_required, device, keep_loaded=[], free_all=False, for_inf
         return
 
     # this check fully unloads any "abandoned" models
-    for i in range(len(current_loaded_models) - 1, -1, -1):
-        if sys.getrefcount(current_loaded_models[i].model) <= 2:
-            current_loaded_models.pop(i).model_unload(avoid_model_moving=True)
+    to_remove = []
+    for _, model_list in current_loaded_models.iter_by_type():
+        for loaded_model in model_list:
+            if sys.getrefcount(loaded_model.model) <= 2:
+                to_remove.append(loaded_model)
+
+    for loaded_model in to_remove:
+        current_loaded_models.remove(loaded_model)
+        loaded_model.model_unload(avoid_model_moving=True)
 
     if free_all:
         memory_required = 1e30
@@ -773,27 +906,35 @@ def free_memory(memory_required, device, keep_loaded=[], free_all=False, for_inf
         offload_everything = ALWAYS_VRAM_OFFLOAD or vram_state is VRAMState.NO_VRAM
 
     unloaded_model = False
-    for i in range(len(current_loaded_models) - 1, -1, -1):
+    # Iterate through models in reverse order (newest to oldest)
+    for model_type, model_list in list(current_loaded_models.iter_by_type()):
+        for i in range(len(model_list) - 1, -1, -1):
+            if not offload_everything:
+                mem_info = get_free_memory(device, use_cache=True)
+                print(f"Current free memory is {mem_info.mem_free_total / (1024 * 1024):.2f} MB ... ", end="")
+                if mem_info.mem_free_total > memory_required:
+                    break
+            shift_model = model_list[i]
+            if shift_model.device == device:
+                if shift_model not in keep_loaded:
+                    m = current_loaded_models.pop_from_type(model_type, i)
+                    if m is not None:
+                        print(f"Unload model {m.model.model.__class__.__name__} ", end="")
+                        m.model_unload()
+                        del m
+                        unloaded_model = True
+
         if not offload_everything:
-            free_memory = get_free_memory(device, use_cache=True)
-            print(f"Current free memory is {free_memory / (1024 * 1024):.2f} MB ... ", end="")
-            if free_memory > memory_required:
+            mem_info = get_free_memory(device, use_cache=True)
+            if mem_info.mem_free_total > memory_required:
                 break
-        shift_model = current_loaded_models[i]
-        if shift_model.device == device:
-            if shift_model not in keep_loaded:
-                m = current_loaded_models.pop(i)
-                print(f"Unload model {m.model.model.__class__.__name__} ", end="")
-                m.model_unload()
-                del m
-                unloaded_model = True
 
     if unloaded_model:
         soft_empty_cache()
     else:
         if vram_state != VRAMState.HIGH_VRAM:
-            mem_free_total, mem_free_torch = get_free_memory(device, torch_free_too=True, use_cache=True)
-            if mem_free_torch > mem_free_total * 0.25:
+            mem_info = get_free_memory(device, use_cache=True)
+            if mem_info.mem_free_torch > mem_info.mem_free_total * 0.25:
                 soft_empty_cache()
 
     print("Done.")
@@ -819,12 +960,16 @@ def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
     for x in models:
         load_model = LoadedModel(x)
 
-        if load_model in current_loaded_models:
-            index = current_loaded_models.index(load_model)
-            loaded_model = current_loaded_models.pop(index)
-            current_loaded_models.insert(0, loaded_model)
-            models_already_loaded.append(loaded_model)
-            del load_model
+        # Check if this model is already loaded
+        found_result = current_loaded_models.find(load_model)
+        if found_result is not None:
+            found_type, found_index = found_result
+            loaded_model = current_loaded_models.move_to_front(found_type, found_index)
+            if loaded_model is not None:
+                models_already_loaded.append(loaded_model)
+                del load_model
+            else:
+                models_to_load.append(load_model)
         else:
             models_to_load.append(load_model)
 
@@ -839,8 +984,8 @@ def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
         for d in devs:
             if d != torch.device("cpu"):
                 # Check if we already have enough memory (using cache for efficiency)
-                current_free = get_free_memory(d, use_cache=True)
-                if current_free < memory_to_free:
+                mem_info = get_free_memory(d, use_cache=True)
+                if mem_info.mem_free_total < memory_to_free:
                     free_memory(memory_for_inference, d, models_already_loaded)
 
         if (moving_time := time.perf_counter() - execution_start_time) > 0.1:
@@ -876,8 +1021,8 @@ def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
             total_required = max(new_model_memory * 1.3 + memory_to_free, memory_to_free)
 
             # Check if we already have enough memory (using cache for efficiency)
-            current_free = get_free_memory(device, use_cache=True)
-            if current_free < total_required:
+            mem_info = get_free_memory(device, use_cache=True)
+            if mem_info.mem_free_total < total_required:
                 free_memory(
                     new_model_memory * 1.3 + memory_for_inference,
                     device,
@@ -897,7 +1042,8 @@ def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
         if vram_set_state == VRAMState.LOW_VRAM or vram_set_state == VRAMState.NORMAL_VRAM:
             model_require = loaded_model.exclusive_memory
             previously_loaded = loaded_model.inclusive_memory
-            current_free_mem = get_free_memory(torch_dev, use_cache=True)
+            mem_info = get_free_memory(torch_dev, use_cache=True)
+            current_free_mem = mem_info.mem_free_total
             estimated_remaining_memory = current_free_mem - model_require - memory_for_inference
 
             print(f"[Memory Management] Target: {loaded_model.model.model.__class__.__name__}, Free GPU: {current_free_mem / (1024 * 1024):.2f} MB, Model Require: {model_require / (1024 * 1024):.2f} MB, Previously Loaded: {previously_loaded / (1024 * 1024):.2f} MB, Inference Require: {memory_for_inference / (1024 * 1024):.2f} MB, Remaining: {estimated_remaining_memory / (1024 * 1024):.2f} MB, ", end="")
@@ -912,7 +1058,7 @@ def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
             model_gpu_memory_when_using_cpu_swap = 0
 
         loaded_model.model_load(model_gpu_memory_when_using_cpu_swap)
-        current_loaded_models.insert(0, loaded_model)
+        current_loaded_models.add(loaded_model)
 
     moving_time = time.perf_counter() - execution_start_time
     print(f"Moving model(s) has taken {moving_time:.2f} seconds")
@@ -923,11 +1069,17 @@ def load_model_gpu(model):
 
 
 def cleanup_models():
-    to_delete = [i for i in range(len(current_loaded_models)) if current_loaded_models[i].real_model() is None]
+    to_delete = []
+    for model_type, model_list in current_loaded_models.iter_by_type():
+        for i in range(len(model_list) - 1, -1, -1):
+            loaded_model = model_list[i]
+            if loaded_model.real_model is None or (callable(loaded_model.real_model) and loaded_model.real_model() is None):
+                to_delete.append((model_type, i))
 
-    for i in reversed(to_delete):
-        m = current_loaded_models.pop(i)
-        del m
+    for model_type, i in to_delete:
+        m = current_loaded_models.pop_from_type(model_type, i)
+        if m is not None:
+            del m
 
     if len(to_delete) > 0:
         soft_empty_cache()
@@ -966,9 +1118,9 @@ def unet_initial_load_device(parameters, dtype):
 
     model_size = dtype_size(dtype) * parameters
 
-    mem_dev = get_free_memory(torch_dev, use_cache=True)
-    mem_cpu = get_free_memory(cpu_dev, use_cache=True)
-    if mem_dev > mem_cpu and model_size < mem_dev:
+    mem_info_dev = get_free_memory(torch_dev, use_cache=True)
+    mem_info_cpu = get_free_memory(cpu_dev, use_cache=True)
+    if mem_info_dev.mem_free_total > mem_info_cpu.mem_free_total and model_size < mem_info_dev.mem_free_total:
         return torch_dev
     else:
         return cpu_dev
@@ -1249,30 +1401,51 @@ def force_upcast_attention_dtype():
     return {torch.float16: torch.float32} if upcast else None
 
 
-def get_free_memory(dev=None, torch_free_too=False, use_cache=True):
-    if dev is None:
-        dev = get_torch_device()
+def get_free_memory(dev=None, use_cache=True) -> MemoryInfo:
+    """
+    Get free memory information for a device.
 
-    # Check cache first if enabled
-    if use_cache:
-        cached_result = _memory_cache.get_cached_memory(dev)
-        if cached_result is not None:
-            mem_free_total_cached, mem_free_torch_cached, _ = cached_result
-            if torch_free_too:
-                return mem_free_total_cached, mem_free_torch_cached
-            else:
-                return mem_free_total_cached
+    Args:
+        dev: Device to query (defaults to current torch device)
+        use_cache: If True, use cached values if available
 
-    # Get memory info using shared function
-    mem_info = _get_memory_info(dev)
+    Returns:
+        MemoryInfo: Complete memory information for the device.
+                    Returns ZERO_MEMORY_INFO on catastrophic failures.
+    """
+    try:
+        if dev is None:
+            dev = get_torch_device()
 
-    # Cache the results
-    _memory_cache.update_cache(dev, mem_info.mem_free_total, mem_info.mem_free_torch, mem_info.mem_total)
+        # Check cache first if enabled
+        if use_cache:
+            try:
+                cached_mem_info = _memory_cache.get_cached_memory(dev)
+                if cached_mem_info is not None:
+                    return cached_mem_info
+            except Exception as e:
+                # Cache read failed, continue to query actual memory
+                print(f"[Memory Cache] Warning: Cache read failed for {dev}: {e}")
+                pass
 
-    if torch_free_too:
-        return mem_info.mem_free_total, mem_info.mem_free_torch
-    else:
-        return mem_info.mem_free_total
+        # Get memory info using shared function
+        mem_info = _get_memory_info(dev)
+
+        # Cache the results
+        try:
+            _memory_cache.update_cache(mem_info)
+        except Exception as e:
+            # Cache update failed, but we still have the memory info to return
+            print(f"[Memory Cache] Warning: Cache update failed for {dev}: {e}")
+            pass
+
+        return mem_info
+
+    except Exception as e:
+        # Fallback for catastrophic failures
+        print(f"[Memory Management] Error getting free memory for {dev}: {e}")
+        # Return zero memory info
+        return ZERO_MEMORY_INFO
 
 
 def cpu_mode():
@@ -1348,7 +1521,8 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
         if x in props.name.lower():
             if manual_cast:
                 # For storage dtype
-                free_model_memory = get_free_memory(use_cache=True) * 0.9 - minimum_inference_memory()
+                mem_info = get_free_memory(use_cache=True)
+                free_model_memory = mem_info.mem_free_total * 0.9 - minimum_inference_memory()
                 if (not prioritize_performance) or model_params * 4 > free_model_memory:
                     return True
             else:
@@ -1403,7 +1577,8 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
         # So in this case bf16 should only be used as storage dtype
         if manual_cast:
             # For storage dtype
-            free_model_memory = get_free_memory() * 0.9 - minimum_inference_memory()
+            mem_info = get_free_memory()
+            free_model_memory = mem_info.mem_free_total * 0.9 - minimum_inference_memory()
             if (not prioritize_performance) or model_params * 4 > free_model_memory:
                 return True
 
@@ -1434,6 +1609,8 @@ def soft_empty_cache(force=False, for_inference=False):
 
 def unload_all_models():
     free_memory(float("inf"), get_torch_device(), free_all=True)
+    gc.collect()
+    
     if vram_state != VRAMState.HIGH_VRAM:
         free_memory(float("inf"), torch.device("cpu"), free_all=True)
 
@@ -1444,7 +1621,7 @@ try:
     if is_nvidia():
         cudnn_version = torch.backends.cudnn.version()
         torch_version = str(torch.version.__version__)
-        if (cudnn_version >= 91002 and cudnn_version < 91500) and (int(torch_version[0]) >= 2 and int(torch_version[2]) >= 9 and int(torch_version[2]) <= 10):
+        if cudnn_version is not None and (cudnn_version >= 91002 and cudnn_version < 91500) and (int(torch_version[0]) >= 2 and int(torch_version[2]) >= 9 and int(torch_version[2]) <= 10):
             NVIDIA_CONV3D_WORKAROUND = True
 except Exception:
     pass

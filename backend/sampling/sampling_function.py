@@ -198,7 +198,8 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
         if memory_management.signal_empty_cache:
             memory_management.soft_empty_cache()
 
-        free_memory = memory_management.get_free_memory(x_in.device)
+        mem_info = memory_management.get_free_memory(x_in.device)
+        free_memory = mem_info.mem_free_total
 
         if (not args.disable_gpu_warning) and x_in.device.type == "cuda":
             free_memory_mb = free_memory / (1024.0 * 1024.0)
