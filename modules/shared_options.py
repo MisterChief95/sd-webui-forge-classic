@@ -41,12 +41,12 @@ options_templates.update(
         ("saving-images", "Saving Images/Grids", "saving"),
         {
             "samples_save": OptionInfo(True, "Automatically save every generated image").info('if disabled, images will needed to be manually saved via the "Save Image" button'),
-            "samples_format": OptionInfo("png", "Image Format", gr.Dropdown, {"choices": ("jpg", "jpeg", "png", "webp", "avif", "heif")}).info('"webp" is recommended if supported'),
+            "samples_format": OptionInfo("png", "Image Format", gr.Dropdown, {"choices": ("jpg", "jpeg", "png", "webp", "jxl", "avif", "heif")}).info('"webp" is recommended if supported').info("some format may not be shown in the Gallery"),
             "samples_filename_pattern": OptionInfo("", "Filename pattern for saving images", component_args=hide_dirs).link("wiki", "https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Custom-Images-Filename-Name-and-Subdirectory"),
             "save_images_add_number": OptionInfo(True, "Append an ascending number to the filename", component_args=hide_dirs),
             "save_images_replace_action": OptionInfo("Override", "Behavior when saving image to an existing filename", gr.Radio, {"choices": ("Override", "Number Suffix"), **hide_dirs}),
             "grid_save": OptionInfo(True, "Automatically save every generated image grid").info("<b>e.g.</b> for <b>X/Y/Z Plot</b>"),
-            "grid_format": OptionInfo("jpg", "Image Format for Grids", gr.Dropdown, {"choices": ("jpg", "jpeg", "png", "webp", "avif", "heif")}),
+            "grid_format": OptionInfo("jpg", "Image Format for Grids", gr.Dropdown, {"choices": ("jpg", "jpeg", "png", "webp", "jxl", "avif", "heif")}),
             "grid_extended_filename": OptionInfo(False, "Append extended info (seed, prompt, etc.) to the filename when saving grids"),
             "grid_only_if_multiple": OptionInfo(True, "Do not save grids that contain only one image"),
             "grid_prevent_empty_spots": OptionInfo(True, "Prevent empty gaps within a grid"),
@@ -242,25 +242,6 @@ options_templates.update(
                 gr.Textbox,
                 {"lines": 3, "max_lines": 6, "placeholder": "<Prompt Start>"},
             ),
-            "divdistill": OptionDiv(),
-            "early_empty_prompt": OptionInfo(
-                0,
-                "Steps to use Empty Prompt at the beginning",
-                gr.Slider,
-                {"minimum": 0, "maximum": 8, "step": 1},
-                infotext="Empty Early CFG",
-            )
-            .info("improve variance for distilled models")
-            .info("does not affect img2img")
-            .needs_restart(),
-            "empty_prompt_template": OptionInfo(
-                "",
-                "Prompt to Encode as the Empty Prompt",
-                gr.Textbox,
-                {"lines": 1, "max_lines": 3, "placeholder": "high quality"},
-            )
-            .info("default is empty")
-            .needs_restart(),
         },
     )
 )

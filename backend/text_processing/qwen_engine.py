@@ -35,8 +35,6 @@ class QwenTextProcessingEngine:
         return self.tokenizer(llama_texts)["input_ids"]
 
     def tokenize_line(self, line: str, images=None):
-        line = line.replace("BREAK", "")
-
         parsed = parsing.parse_prompt_attention(line, self.emphasis.name)
         tokenized = self.tokenize([text for text, _ in parsed], bool(images))
 
@@ -99,7 +97,7 @@ class QwenTextProcessingEngine:
 
             zs.extend(line_z_values)
 
-        return torch.stack(zs)
+        return zs
 
     def strip_template(self, out, tokens):
         template_end = 0

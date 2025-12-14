@@ -36,8 +36,6 @@ class Qwen3TextProcessingEngine:
         return self.tokenizer(llama_texts)["input_ids"]
 
     def tokenize_line(self, line: str):
-        line = line.replace("BREAK", "")
-
         parsed = parsing.parse_prompt_attention(line, self.emphasis.name)
         tokenized = self.tokenize([text for text, _ in parsed])
 
@@ -86,7 +84,7 @@ class Qwen3TextProcessingEngine:
 
             zs.extend(line_z_values)
 
-        return torch.stack(zs)
+        return zs
 
     def process_embeds(self, batch_tokens):
         device = memory_management.text_encoder_device()

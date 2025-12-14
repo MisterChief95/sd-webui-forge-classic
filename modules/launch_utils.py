@@ -89,12 +89,21 @@ def run(command, desc=None, errdesc=None, custom_env=None, live: bool = default_
     return result.stdout or ""
 
 
-def _torch_version() -> str:
+def _torch_version() -> tuple[str, str]:
+    """Given `2.10.0.dev20251111+cu130` ; Return `("2.10.0", "cu130")`"""
     import importlib.metadata
 
     ver = importlib.metadata.version("torch")
-    ver = ver.split("+", 1)[0]
-    return re.search(r"[\d.]+[\d]", ver).group(0)
+    m = re.search(r"(\d+\.\d+\.\d+)(?:[^+]+)?\+(.+)", ver)
+
+    if m is None:
+        print("\n\nFailed to parse PyTorch version...")
+        ver = os.environ.get("PYTORCH_VERSION", "2.9.1+cu128")
+        print("Assuming: ", ver)
+        print('(you can change this with `export PYTORCH_VERSION="..."`)\n\n')
+        m = re.search(r"(\d+\.\d+\.\d+)(?:[^+]+)?\+(.+)", ver)
+
+    return m.group(1), m.group(2)
 
 
 def is_installed(package):
@@ -123,9 +132,12 @@ def run_pip(command, desc=None, live=default_command_live):
     return run(f'"{python}" -m pip {command} --prefer-binary{index_url_line}', desc=f"Installing {desc}", errdesc=f"Couldn't install {desc}", live=live)
 
 
-def check_run_python(code: str) -> bool:
+def check_run_python(code: str, *, return_error: bool = False) -> bool | tuple[bool, str]:
     result = subprocess.run([python, "-c", code], capture_output=True, shell=False)
-    return result.returncode == 0
+    if return_error:
+        return result.returncode == 0, result.stderr
+    else:
+        return result.returncode == 0
 
 
 def git_fix_workspace(*args, **kwargs):
@@ -238,7 +250,7 @@ def run_extensions_installers(settings_file):
     return
 
 
-re_requirement = re.compile(r"\s*([-_a-zA-Z0-9]+)\s*(?:==\s*([-+_.a-zA-Z0-9]+))?\s*")
+re_requirement = re.compile(r"\s*(\S+)\s*==\s*(\S+)\s*")
 
 
 def requirements_met(requirements_file):
@@ -256,36 +268,32 @@ def requirements_met(requirements_file):
             if line.strip() == "":
                 continue
 
-            m = re.match(re_requirement, line)
-            if m is None:
-                return False
-
-            package = m.group(1).strip()
-            version_required = (m.group(2) or "").strip()
-
-            if version_required == "":
+            if (m := re.match(re_requirement, line)) is None:
                 continue
+
+            package = m.group(1)
+            version_required = m.group(2)
 
             try:
                 version_installed = importlib.metadata.version(package)
             except Exception:
                 return False
 
-            if packaging.version.parse(version_required) != packaging.version.parse(version_installed):
+            if packaging.version.parse(version_installed) < packaging.version.parse(version_required):
                 return False
 
     return True
 
 
 def prepare_environment():
-    torch_index_url = os.environ.get("TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu128")
-    torch_command = os.environ.get("TORCH_COMMAND", f"pip install torch==2.9.1+cu128 torchvision==0.24.1+cu128 --extra-index-url {torch_index_url}")
-    xformers_package = os.environ.get("XFORMERS_PACKAGE", f"xformers==0.0.33.post1 --extra-index-url {torch_index_url}")
+    torch_index_url = os.environ.get("TORCH_INDEX_URL", "https://download.pytorch.org/whl/cu130")
+    torch_command = os.environ.get("TORCH_COMMAND", f"pip install torch==2.9.1+cu130 torchvision==0.24.1+cu130 --extra-index-url {torch_index_url}")
+    xformers_package = os.environ.get("XFORMERS_PACKAGE", f"xformers==0.0.33.post2 --extra-index-url {torch_index_url}")
     bnb_package = os.environ.get("BNB_PACKAGE", "bitsandbytes==0.48.2")
 
     clip_package = os.environ.get("CLIP_PACKAGE", "https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip")
-    packaging_package = os.environ.get("PACKAGING_PACKAGE", "packaging==24.2")
-    gradio_package = os.environ.get("GRADIO_PACKAGE", "gradio==4.40.0 gradio_imageslider==0.0.20 gradio_rangeslider==0.0.6")
+    packaging_package = os.environ.get("PACKAGING_PACKAGE", "packaging==25.0")
+    gradio_package = os.environ.get("GRADIO_PACKAGE", "gradio==4.40.0 gradio_imageslider==0.0.20 gradio_rangeslider==0.0.8")
     requirements_file = os.environ.get("REQS_FILE", "requirements.txt")
 
     try:
@@ -310,7 +318,10 @@ def prepare_environment():
         startup_timer.record("install torch")
 
     if not args.skip_torch_cuda_test:
-        if not check_run_python("import torch; assert torch.cuda.is_available()"):
+        success, err = check_run_python("import torch; assert torch.cuda.is_available()", return_error=True)
+        if not success:
+            if "older driver" in str(err).lower():
+                raise SystemError("Please update your GPU driver to support cu130 ; or manually install older PyTorch")
             raise RuntimeError("PyTorch is not able to access CUDA")
         startup_timer.record("torch GPU test")
 
@@ -321,23 +332,23 @@ def prepare_environment():
     ver_SAGE = "2.2.0"
     ver_FLASH = "2.8.3"
     ver_TRITON = "3.5.1"
-    ver_NUNCHAKU = "1.0.2"
-    ver_TORCH = _torch_version()
+    ver_NUNCHAKU = "1.1.0.dev20251111"
+    ver_TORCH, ver_CUDA = _torch_version()
+    v_TORCH = ver_TORCH.rsplit(".", 1)[0]
 
     if os.name == "nt":
-        post_SAGE = ".post3"
-        ver_TRITON += ".post21"
+        ver_TRITON += ".post22"
 
-        sage_package = os.environ.get("SAGE_PACKAGE", f"https://github.com/woct0rdho/SageAttention/releases/download/v{ver_SAGE}-windows{post_SAGE}/sageattention-{ver_SAGE}+cu128torch{ver_TORCH.replace('.1', '.0')}{post_SAGE}-cp39-abi3-win_amd64.whl")
-        flash_package = os.environ.get("FLASH_PACKAGE", f"https://github.com/kingbri1/flash-attention/releases/download/v{ver_FLASH}/flash_attn-{ver_FLASH}+cu128torch{ver_TORCH}cxx11abiFALSE-{ver_PY}-{ver_PY}-win_amd64.whl")
+        sage_package = os.environ.get("SAGE_PACKAGE", f"https://github.com/woct0rdho/SageAttention/releases/download/v{ver_SAGE}-windows.post4/sageattention-{ver_SAGE}+{ver_CUDA}torch2.9.0andhigher.post4-cp39-abi3-win_amd64.whl")
+        flash_package = os.environ.get("FLASH_PACKAGE", f"https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.4.19/flash_attn-{ver_FLASH}+{ver_CUDA}torch{v_TORCH}-{ver_PY}-{ver_PY}-win_amd64.whl")
         triton_package = os.environ.get("TRITION_PACKAGE", f"triton-windows=={ver_TRITON}")
-        nunchaku_package = os.environ.get("NUNCHAKU_PACKAGE", f"https://github.com/nunchaku-tech/nunchaku/releases/download/v{ver_NUNCHAKU}/nunchaku-{ver_NUNCHAKU}+torch{ver_TORCH[:3]}-{ver_PY}-{ver_PY}-win_amd64.whl")
+        nunchaku_package = os.environ.get("NUNCHAKU_PACKAGE", f"https://github.com/nunchaku-tech/nunchaku/releases/download/v1.1.0dev20251111/nunchaku-{ver_NUNCHAKU}+torch{v_TORCH}-{ver_PY}-{ver_PY}-win_amd64.whl")
 
     else:
         sage_package = os.environ.get("SAGE_PACKAGE", f"sageattention=={ver_SAGE}")
-        flash_package = os.environ.get("FLASH_PACKAGE", f"https://github.com/Dao-AILab/flash-attention/releases/download/v{ver_FLASH}/flash_attn-{ver_FLASH}+cu12torch{ver_TORCH[:3]}cxx11abiFALSE-{ver_PY}-{ver_PY}-linux_x86_64.whl")
+        flash_package = os.environ.get("FLASH_PACKAGE", f"https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.5.4/flash_attn-{ver_FLASH}+{ver_CUDA}torch{v_TORCH}-{ver_PY}-{ver_PY}-linux_x86_64.whl")
         triton_package = os.environ.get("TRITION_PACKAGE", f"triton=={ver_TRITON}")
-        nunchaku_package = os.environ.get("NUNCHAKU_PACKAGE", f"https://github.com/nunchaku-tech/nunchaku/releases/download/v{ver_NUNCHAKU}/nunchaku-{ver_NUNCHAKU}+torch{ver_TORCH[:3]}-{ver_PY}-{ver_PY}-linux_x86_64.whl")
+        nunchaku_package = os.environ.get("NUNCHAKU_PACKAGE", f"https://github.com/nunchaku-tech/nunchaku/releases/download/v1.1.0dev20251111/nunchaku-{ver_NUNCHAKU}+torch{v_TORCH}-{ver_PY}-{ver_PY}-linux_x86_64.whl")
 
     def _verify_nunchaku() -> bool:
         if not is_installed("nunchaku"):
@@ -363,24 +374,29 @@ def prepare_environment():
 
     if args.sage:
         if not is_installed("triton"):
-            run_pip(f"install -U -I --no-deps {triton_package}", "triton")
-            startup_timer.record("install triton")
+            try:
+                run_pip(f"install -U -I --no-deps {triton_package}", "triton")
+            except RuntimeError:
+                print("Failed to install triton; Please manually install it")
+            else:
+                startup_timer.record("install triton")
         if not is_installed("sageattention"):
-            run_pip(f"install -U -I --no-deps {sage_package}", "sageattention")
-            startup_timer.record("install sageattention")
+            try:
+                run_pip(f"install -U -I --no-deps {sage_package}", "sageattention")
+            except RuntimeError:
+                print("Failed to install sageattention; Please manually install it")
+            else:
+                startup_timer.record("install sageattention")
 
     if args.flash and not is_installed("flash_attn"):
         try:
             run_pip(f"install {flash_package}", "flash_attn")
         except RuntimeError:
-            if "9" in ver_TORCH and os.name == "nt":
-                print("There is currently no flash_attn built for PyTorch 2.9.0 on Windows...")
-            else:
-                print("Failed to install flash_attn; Please manually install it")
+            print("Failed to install flash_attn; Please manually install it")
         else:
             startup_timer.record("install flash_attn")
 
-    if not _verify_nunchaku():
+    if args.nunchaku and not _verify_nunchaku():
         try:
             run_pip(f"install {nunchaku_package}", "nunchaku")
         except RuntimeError:
@@ -388,7 +404,7 @@ def prepare_environment():
         else:
             startup_timer.record("install nunchaku")
 
-    if not args.disable_bnb and not is_installed("bitsandbytes"):
+    if args.bnb and not is_installed("bitsandbytes"):
         try:
             run_pip(f"install {bnb_package}", "bitsandbytes")
         except RuntimeError:
@@ -400,19 +416,19 @@ def prepare_environment():
         run_pip("install ngrok", "ngrok")
         startup_timer.record("install ngrok")
 
-    if not os.path.isfile(requirements_file):
-        requirements_file = os.path.join(script_path, requirements_file)
-
     if not is_installed("gradio"):
         run_pip(f"install {gradio_package}", "gradio")
+
+    if not os.path.isfile(requirements_file):
+        requirements_file = os.path.join(script_path, requirements_file)
 
     if not requirements_met(requirements_file):
         run_pip(f'install -r "{requirements_file}"', "requirements")
         startup_timer.record("install requirements")
 
     if args.onnxruntime_gpu and not is_installed("onnxruntime-gpu"):
-        # https://onnxruntime.ai/docs/install/#install-onnx-runtime-gpu-cuda-12x
-        onnxruntime_package = os.environ.get("ONNX_PACKAGE", "onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/")
+        # https://onnxruntime.ai/docs/install/#nightly-for-cuda-13x
+        onnxruntime_package = os.environ.get("ONNX_PACKAGE", "onnxruntime-gpu --pre --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/")
         run_pip(f"install {onnxruntime_package}", "onnxruntime-gpu")
         startup_timer.record("install onnxruntime-gpu")
 

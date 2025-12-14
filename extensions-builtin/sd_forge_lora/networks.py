@@ -27,11 +27,6 @@ def load_lora_for_models(model: "UnetPatcher", clip, lora, strength_model, stren
     unet_keys = model_lora_keys_unet(model.model) if model is not None else {}
     clip_keys = model_lora_keys_clip(clip.cond_stage_model) if clip is not None else {}
 
-    if "diffusion_model.final_layer.adaLN_modulation.1" in unet_keys.keys():  # z-image
-        from backend.nn._z_lora import convert_z_image_lora
-
-        lora = convert_z_image_lora(lora)
-
     lora_unmatch = lora
     lora_unet, lora_unmatch = load_lora(lora_unmatch, unet_keys)
     lora_clip, lora_unmatch = load_lora(lora_unmatch, clip_keys)
@@ -105,15 +100,15 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         list_available_networks()
         networks_on_disk = [available_networks.get(name, None) if name.lower() in forbidden_network_aliases else available_network_aliases.get(name, None) for name in names]
 
-    for i, (network_on_disk, name) in enumerate(zip(networks_on_disk, names)):
+    for network_on_disk, name in zip(networks_on_disk, names):
         try:
             net = load_network(name, network_on_disk)
-        except Exception as e:
-            errors.display(e, f"loading network {network_on_disk.filename}")
+            net.mentioned_name = name
+            network_on_disk.read_hash()
+            loaded_networks.append(net)
+        except Exception:
+            print(f'\nFailed to load LoRA: "{name}"\n')
             continue
-        net.mentioned_name = name
-        network_on_disk.read_hash()
-        loaded_networks.append(net)
 
     online_mode = dynamic_args.get("online_lora", False)
 
@@ -122,6 +117,8 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
 
     compiled_lora_targets = []
     for a, b, c in zip(networks_on_disk, unet_multipliers, te_multipliers):
+        if a is None:
+            continue
         compiled_lora_targets.append([a.filename, b, c, online_mode])
 
     compiled_lora_targets_hash = str(compiled_lora_targets)
