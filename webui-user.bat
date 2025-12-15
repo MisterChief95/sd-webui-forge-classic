@@ -4,7 +4,7 @@
 :: set GIT=
 :: set VENV_DIR=
 
-set COMMANDLINE_ARGS=--adv-samplers --xformers --uv --skip-python-version-check --skip-torch-cuda-test --skip-version-check --pin-shared-memory --cuda-malloc --cuda-stream
+set COMMANDLINE_ARGS=
 
 :: --xformers --sage --uv
 :: --pin-shared-memory --cuda-malloc --cuda-stream
