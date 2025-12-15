@@ -85,9 +85,12 @@ class Flux(ForgeDiffusionEngine):
         else:
             print("Distilled CFG Scale is ignored for Schnell")
 
-        if not prompt.is_negative_prompt and dynamic_args["kontext"]:
-            dynamic_args["ref_latents"] = self.ref_latents.copy()
-            self.ref_latents.clear()
+        if not prompt.is_negative_prompt:
+            if dynamic_args["kontext"] and self.ref_latents:
+                dynamic_args["ref_latents"] = self.ref_latents.copy()
+                self.ref_latents.clear()
+            else:
+                dynamic_args["ref_latents"] = None
 
         return cond
 
@@ -105,6 +108,7 @@ class Flux(ForgeDiffusionEngine):
 
     @torch.inference_mode()
     def decode_first_stage(self, x):
+        self.ref_latents.clear()
         sample = self.forge_objects.vae.first_stage_model.process_out(x)
         sample = self.forge_objects.vae.decode(sample).movedim(-1, 1) * 2.0 - 1.0
         return sample.to(x)

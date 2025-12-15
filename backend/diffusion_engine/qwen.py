@@ -7,7 +7,8 @@ if TYPE_CHECKING:
 import torch
 from huggingface_guess import model_list
 
-from backend import args, memory_management
+from backend import memory_management
+from backend.args import dynamic_args
 from backend.diffusion_engine.base import ForgeDiffusionEngine, ForgeObjects
 from backend.modules.k_prediction import PredictionDiscreteFlow
 from backend.patcher.clip import CLIP
@@ -50,15 +51,18 @@ class QwenImage(ForgeDiffusionEngine):
     @torch.inference_mode()
     def get_learned_conditioning(self, prompt: "SdConditioning"):
         memory_management.load_model_gpu(self.forge_objects.clip.patcher)
-        if not prompt.is_negative_prompt and self.image_prompt:
-            return self.get_learned_conditioning_with_image(prompt)
+        if not prompt.is_negative_prompt:
+            if self.image_prompt:
+                return self.get_learned_conditioning_with_image(prompt)
+            else:
+                dynamic_args["ref_latents"] = None
         return self.text_processing_engine_qwen(prompt)
 
     @torch.inference_mode()
     def get_learned_conditioning_with_image(self, prompt: list[str]):
         cond = self.text_processing_engine_qwen([self.image_prompt + "".join(prompt)], images=self.images_vl)
-        args.dynamic_args["ref_latents"] = self.ref_latents.copy()
         self.images_vl.clear()
+        dynamic_args["ref_latents"] = self.ref_latents.copy()
         self.ref_latents.clear()
         self.image_prompt = ""
         return cond
@@ -103,6 +107,8 @@ class QwenImage(ForgeDiffusionEngine):
 
     @torch.inference_mode()
     def decode_first_stage(self, x):
+        self.ref_latents.clear()
+        self.image_prompt = ""
         sample = self.forge_objects.vae.first_stage_model.process_out(x)
         sample = self.forge_objects.vae.decode(sample).movedim(-1, 2) * 2.0 - 1.0
         return sample.to(x)

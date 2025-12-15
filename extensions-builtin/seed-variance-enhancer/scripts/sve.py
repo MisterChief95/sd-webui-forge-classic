@@ -19,11 +19,11 @@ Improve seed-to-seed image variance for distilled models (<b>i.e.</b> CFG = <cod
 class SeedVarianceEnhancer(scripts.Script):
     sorting_priority = 1125
 
-    enable: bool
-    steps: int
-    percentage: float
-    strength: float
-    seed: int
+    enable: bool = False
+    steps: int = -1
+    percentage: float = 0.0
+    strength: float = 0.0
+    seed: int = -1
 
     def title(self):
         return "SeedVarianceEnhancer Integrated"
@@ -35,9 +35,9 @@ class SeedVarianceEnhancer(scripts.Script):
         with InputAccordion(value=False, label=self.title()) as enable:
             gr.HTML(info)
             with gr.Row():
-                steps = gr.Slider(value=3, minimum=0, maximum=8, step=1, label="Steps", info="the number of steps to inject random noise")
+                steps = gr.Slider(value=2, minimum=0, maximum=8, step=1, label="Steps", info="the number of steps to inject random noise")
                 percentage = gr.Slider(value=0.6, minimum=0.0, maximum=1.0, step=0.05, label="Percentage", info="the percentage of conditioning to inject random noise")
-                strength = gr.Slider(value=32, minimum=0, maximum=64, step=1, label="Strength", info="the strength of the random noise")
+                strength = gr.Slider(value=24, minimum=0, maximum=64, step=1, label="Strength", info="the strength of the random noise")
 
         self.infotext_fields = [
             PasteField(steps, "SVE Steps"),
@@ -69,6 +69,8 @@ class SeedVarianceEnhancer(scripts.Script):
     @torch.inference_mode()
     def on_cfg(cls, params: CFGDenoiserParams):
         if not isinstance(params.denoiser.p, StableDiffusionProcessingTxt2Img) or not cls.enable:
+            return
+        if params.text_cond is None:
             return
         if cls.steps < params.sampling_step:
             return
