@@ -1,3 +1,4 @@
+import inspect
 import logging
 from typing import Callable
 
@@ -7,12 +8,25 @@ from modules import sd_samplers_common, sd_samplers_kdiffusion
 
 
 class AlterSampler(sd_samplers_kdiffusion.KDiffusionSampler):
-    def __init__(self, sd_model, sampler_name):
+    def __init__(self, sd_model, sampler_name, **kwargs):
         sampler_function: Callable = getattr(k_diffusion.sampling, f"sample_{sampler_name}", None)
         if sampler_function is None:
             raise ValueError(f"Unknown sampler: {sampler_name}")
 
-        super().__init__(sampler_function, sd_model, None)
+        # Store additional kwargs like cfg_pp for later use
+        self.sampler_kwargs = kwargs
+        super().__init__(sampler_function, sd_model)
+
+    def initialize(self, p) -> dict:
+        extra_params_kwargs = super().initialize(p)
+
+        # Add any additional sampler-specific kwargs (like cfg_pp)
+        parameters = inspect.signature(self.func).parameters
+        for key, value in self.sampler_kwargs.items():
+            if key in parameters:
+                extra_params_kwargs[key] = value
+
+        return extra_params_kwargs
 
     def sample(self, p, *args, **kwargs):
         if p.cfg_scale > 2.0:
@@ -25,14 +39,14 @@ class AlterSampler(sd_samplers_kdiffusion.KDiffusionSampler):
         return super().sample_img2img(p, *args, **kwargs)
 
 
-def build_constructor(sampler_key: str) -> Callable:
+def build_constructor(sampler_key: str, **kwargs) -> Callable:
     def constructor(model):
-        return AlterSampler(model, sampler_key)
+        return AlterSampler(model, sampler_key, **kwargs)
 
     return constructor
 
 
-def create_cfg_pp_sampler(sampler_name: str, sampler_key: str) -> "sd_samplers_common.SamplerData":
+def create_cfg_pp_sampler(sampler_name: str, sampler_key: str, **kwargs) -> "sd_samplers_common.SamplerData":
     config = {}
     base_name = sampler_name.removesuffix(" CFG++")
     for name, _, _, params in sd_samplers_kdiffusion.samplers_k_diffusion:
@@ -40,11 +54,12 @@ def create_cfg_pp_sampler(sampler_name: str, sampler_key: str) -> "sd_samplers_c
             config = params.copy()
             break
 
-    return sd_samplers_common.SamplerData(sampler_name, build_constructor(sampler_key=sampler_key), [sampler_key], config)
+    return sd_samplers_common.SamplerData(sampler_name, build_constructor(sampler_key=sampler_key, **kwargs), [sampler_key], config)
 
 
 samplers_data_alter = [
     create_cfg_pp_sampler("DPM++ 2M CFG++", "dpmpp_2m_cfg_pp"),
     create_cfg_pp_sampler("Euler a CFG++", "euler_ancestral_cfg_pp"),
     create_cfg_pp_sampler("Euler CFG++", "euler_cfg_pp"),
+    create_cfg_pp_sampler("Res Multistep CFG++", "res_multistep", cfg_pp=True),
 ]
