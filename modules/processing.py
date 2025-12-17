@@ -483,7 +483,7 @@ class StableDiffusionProcessing:
         self.step_multiplier = total_steps // self.steps
         self.firstpass_steps = total_steps
 
-        if self.cfg_scale == 1:
+        if self.cfg_scale == 1 and not opts.disable_cfg1_optimization:
             self.uc = None
             print("Skipping unconditional conditioning when CFG = 1. Negative Prompts are ignored.")
         else:
@@ -1590,7 +1590,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         steps = self.hr_second_pass_steps or self.steps
         total_steps = sampler_config.total_steps(steps) if sampler_config else steps
 
-        if self.hr_cfg == 1:
+        if self.hr_cfg == 1 and not opts.disable_cfg1_optimization:
             self.hr_uc = None
             print("Skipping unconditional conditioning (HR pass) when CFG = 1. Negative Prompts are ignored.")
         else:
