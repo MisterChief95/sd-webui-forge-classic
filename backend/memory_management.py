@@ -10,7 +10,7 @@ from enum import Enum
 import psutil
 import torch
 
-from backend import stream, utils
+from backend import operations, stream, utils
 from backend.args import args
 from backend.patcher.base import ModelPatcher
 
@@ -450,59 +450,6 @@ class MemoryCache:
 # Global memory cache instance
 _memory_cache = MemoryCache()
 
-
-class ModelComponentCache:
-    """Cache reusable model components across reloads"""
-
-    def __init__(self):
-        self.vae_cache = {}  # hash -> (vae_model, last_used_time)
-        self.text_encoder_cache = {}  # hash -> (encoder, last_used_time)
-        self.max_cache_size = 2  # Keep last 2 of each component type
-
-    def get_vae(self, model_hash):
-        """Get cached VAE if available"""
-        if model_hash in self.vae_cache:
-            vae, _ = self.vae_cache[model_hash]
-            self.vae_cache[model_hash] = (vae, time.perf_counter())
-            return vae
-        return None
-
-    def store_vae(self, model_hash, vae):
-        """Store VAE in cache, evicting oldest if needed"""
-        self.vae_cache[model_hash] = (vae, time.perf_counter())
-        self._evict_old_entries(self.vae_cache)
-
-    def get_text_encoder(self, model_hash):
-        """Get cached text encoder if available"""
-        if model_hash in self.text_encoder_cache:
-            encoder, _ = self.text_encoder_cache[model_hash]
-            self.text_encoder_cache[model_hash] = (encoder, time.perf_counter())
-            return encoder
-        return None
-
-    def store_text_encoder(self, model_hash, encoder):
-        """Store text encoder in cache, evicting oldest if needed"""
-        self.text_encoder_cache[model_hash] = (encoder, time.perf_counter())
-        self._evict_old_entries(self.text_encoder_cache)
-
-    def _evict_old_entries(self, cache_dict):
-        """Keep only max_cache_size most recent entries"""
-        if len(cache_dict) > self.max_cache_size:
-            # Sort by last used time and keep most recent
-            sorted_items = sorted(cache_dict.items(), key=lambda x: x[1][1], reverse=True)
-            for key, _ in sorted_items[self.max_cache_size:]:
-                del cache_dict[key]
-
-    def clear(self):
-        """Clear all cached components"""
-        self.vae_cache.clear()
-        self.text_encoder_cache.clear()
-
-
-# Global component cache instance
-_component_cache = ModelComponentCache()
-
-
 class LoadedModelsManager:
     """Manages loaded models organized by type for efficient tracking and access"""
 
@@ -881,7 +828,7 @@ def unload_model_clones(model):
         _memory_cache.invalidate_cache()
 
 
-def free_memory(memory_required, device, keep_loaded=[], free_all=False, for_inference=False):
+def free_memory(memory_required, device: torch.device | str, keep_loaded=[], free_all=False, for_inference=False):
     if for_inference:
         soft_empty_cache(for_inference=True)
         return
@@ -930,7 +877,8 @@ def free_memory(memory_required, device, keep_loaded=[], free_all=False, for_inf
                 break
 
     if unloaded_model:
-        soft_empty_cache()
+        soft_empty_cache(force=free_all)
+
     else:
         if vram_state != VRAMState.HIGH_VRAM:
             mem_info = get_free_memory(device, use_cache=True)
@@ -1606,13 +1554,46 @@ def soft_empty_cache(force=False, for_inference=False):
     if not for_inference and (force or signal_empty_cache):
         _memory_cache.invalidate_cache()
 
-
+# TODO: optimize this function further by avoiding redundant operations, look for leftover refs
 def unload_all_models():
-    free_memory(float("inf"), get_torch_device(), free_all=True)
+    """Aggressively unload ALL models and clear ALL caches to free VRAM completely"""
+
+    # Step 1: Unload all models from both devices
+    for device in [get_torch_device(), torch.device("cpu")]:
+        free_memory(float("inf"), device, free_all=True)
+
+    # Step 2: Clear operations cache/stash (contains tensor references)
+    operations.cleanup_cache()
+
+    # Step 3: Force synchronization before clearing caches
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif is_intel_xpu():
+        torch.xpu.synchronize()
+
+    # Step 4: Reinitialize streams to release test tensors
+    stream.reinitialize_streams()
+
+    # Step 5: Force cache emptying (calls empty_cache internally)
+    soft_empty_cache(force=True)
+
+    # Step 6: Multiple garbage collection passes for circular references
     gc.collect()
-    
-    if vram_state != VRAMState.HIGH_VRAM:
-        free_memory(float("inf"), torch.device("cpu"), free_all=True)
+    gc.collect()
+    gc.collect()
+
+    # Step 7: Final aggressive VRAM cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+        torch.cuda.synchronize()
+    elif is_intel_xpu():
+        torch.xpu.empty_cache()
+    elif cpu_state == CPUState.MPS:
+        torch.mps.empty_cache()
+
+    # Step 8: One more GC pass after emptying caches
+    gc.collect()
 
 
 # https://github.com/comfyanonymous/ComfyUI/blob/v0.3.71/comfy/ops.py#L58
