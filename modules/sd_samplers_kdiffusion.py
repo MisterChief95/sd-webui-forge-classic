@@ -23,10 +23,16 @@ samplers_k_diffusion = [
     ("LMS", "sample_lms", ["k_lms"], {}),
     ("Heun", "sample_heun", ["k_heun"], {"second_order": True}),
     ("DPM2", "sample_dpm_2", ["k_dpm_2"], {"scheduler": "karras", "discard_next_to_last_sigma": True, "second_order": True}),
-    ("Res Multistep", "sample_res_multistep", ["res_multistep"], {}),
+    ("DEIS", "sample_deis", ["k_deis"], {"scheduler": "karras", "second_order": True}),
+    ("Res Multistep", "sample_res_multistep", ["res_multistep"], {"scheduler": "sgm_uniform"}),
+    ("Extended Reverse-Time SDE", "sample_er_sde", ["er_sde"], {"scheduler": "sgm_uniform"}),
+    ("Gradient Estimation", "sample_gradient_estimation", ["gradient_estimation"], {}),
     ("Kohaku LoNyu Yog", "sample_Kohaku_LoNyu_Yog", ["Kohaku_LoNyu_Yog"], {}),
     ("Restart", sd_samplers_extra.restart_sampler, ["restart"], {"scheduler": "karras", "second_order": True}),
     ("UniPC", sd_samplers_extra.sample_unipc, ["unipc"], {"discard_next_to_last_sigma": True}),
+    ("Seeds2", "sample_seeds_2", ["seeds_2"], {"second_order": True}),
+    ("Seeds3", "sample_seeds_3", ["seeds_3"], {"third_order": True}),
+    ("SA Solver", "sample_sa_solver", ["sa_solver"], {}),
 ]
 
 
