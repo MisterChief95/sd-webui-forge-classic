@@ -318,8 +318,28 @@ def create_ui():
                                     with gr.Column():
                                         hr_negative_prompt = gr.Textbox(label="Hires negative prompt", elem_id="hires_neg_prompt", show_label=False, lines=3, placeholder="Negative prompt for hires fix pass.\nLeave empty to use the same negative prompt as in first pass.", elem_classes=["prompt"])
 
+                                with gr.Accordion(label="Iterative Upscale", open=False, elem_id="txt2img_hr_iter"):
+                                    with FormRow(elem_id="txt2img_hr_iter_row1", variant="compact"):
+                                        with gr.Column():
+                                            hr_iterations = gr.Slider(minimum=1, maximum=10, step=1, label="Iterations", value=1, elem_id="txt2img_hr_iter_steps")
+                                        with gr.Column():
+                                            hr_iter_target_steps = gr.Slider(minimum=0, maximum=100, step=1, label="Target steps", value=0, elem_id="txt2img_hr_iter_target_steps", interactive=False)
+                                    with FormRow(elem_id="txt2img_hr_iter_row2", variant="compact"):
+                                        with gr.Column():
+                                            hr_iter_target_denoise = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Target denoise", value=0, elem_id="txt2img_hr_iter_target_denoise", interactive=False)
+                                        with gr.Column():
+                                            hr_iter_target_cfg = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label="Target CFG", value=0, elem_id="txt2img_hr_iter_target_cfg", interactive=False)
+
                                 if not opts.disable_cfg1_optimization:
                                     hr_cfg.change(lambda x: gr.update(interactive=(x != 1)), inputs=[hr_cfg], outputs=[hr_negative_prompt], queue=False, show_progress=False)
+
+                                hr_iterations.change(
+                                    fn=lambda steps: [gr.update(interactive=steps > 1)] * 3,
+                                    inputs=[hr_iterations],
+                                    outputs=[hr_iter_target_steps, hr_iter_target_denoise, hr_iter_target_cfg],
+                                    show_progress=False,
+                                    queue=False,
+                                )
 
                             scripts.scripts_txt2img.setup_ui_for_section(category)
 
@@ -386,6 +406,10 @@ def create_ui():
                 hr_negative_prompt,
                 hr_cfg,
                 hr_distilled_cfg,
+                hr_iterations,
+                hr_iter_target_steps,
+                hr_iter_target_denoise,
+                hr_iter_target_cfg,
                 override_settings,
             ] + custom_inputs
 
@@ -469,6 +493,10 @@ def create_ui():
                 PasteField(hr_cfg, "Hires CFG Scale", api="hr_cfg"),
                 PasteField(hr_distilled_cfg, "Hires Distilled CFG Scale", api="hr_distilled_cfg"),
                 PasteField(hr_prompts_container, lambda d: gr.update(visible=True) if d.get("Hires prompt", "") != "" or d.get("Hires negative prompt", "") != "" else gr.skip()),
+                PasteField(hr_iterations, "HiRes Iterations", api="hr_iterations"),
+                PasteField(hr_iter_target_steps, "HiRes Iter Target Steps", api="hr_iter_target_steps"),
+                PasteField(hr_iter_target_denoise, "HiRes Iter Target Denoise", api="hr_iter_target_denoise"),
+                PasteField(hr_iter_target_cfg, "HiRes Iter Target CFG", api="hr_iter_target_cfg"),
                 *scripts.scripts_txt2img.infotext_fields,
             ]
             parameters_copypaste.add_paste_fields("txt2img", None, txt2img_paste_fields, override_settings)
