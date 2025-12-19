@@ -1,7 +1,32 @@
-# https://github.com/comfyanonymous/ComfyUI/blob/v0.3.75/comfy/k_diffusion/sampling.py
+# https://github.com/comfyanonymous/ComfyUI/blob/v0.5.0/comfy/k_diffusion/sampling.py
+"""
+K-Diffusion Sampling Methods
+
+This module implements various diffusion model sampling algorithms including:
+- Deterministic: Euler, Heun, DPM-Solver variants
+- Stochastic: Ancestral samplers, SDE variants
+- Advanced: DEIS, SA-Solver, SEEDS, ER-SDE
+- CFG++: Enhanced classifier-free guidance variants
+
+Each sampler follows the standard interface:
+    sampler(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs)
+
+For Rectified Flow models (prediction_type="const"), certain samplers automatically
+route to specialized RF variants.
+
+Standard callback dictionary format:
+{
+    "x": torch.Tensor,           # Current latent state
+    "i": int,                    # Current step index
+    "sigma": torch.Tensor,       # Current sigma value
+    "sigma_hat": torch.Tensor,   # Adjusted sigma (may equal sigma)
+    "denoised": torch.Tensor,    # Denoised prediction
+}
+"""
 
 import math
 from functools import partial
+from typing import Optional, Callable, Dict, Any, Tuple, Union
 
 import torch
 import torchsde
@@ -15,15 +40,59 @@ from . import sa_solver
 from . import utils
 
 
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Sigma schedule parameters
+DEFAULT_KARRAS_RHO = 7.0  # Karras et al. (2022) noise schedule rho parameter
+VP_BETA_D_DEFAULT = 19.9  # VP schedule beta_d parameter
+VP_BETA_MIN_DEFAULT = 0.1  # VP schedule beta_min parameter
+VP_EPS_S_DEFAULT = 1e-3  # VP schedule epsilon_s parameter
+
+# Numerical stability
+SIGMA_OFFSET_PERCENT = 1e-4  # Offset to avoid invalid logSNR at sigma boundaries
+EI_EPSILON = 1e-8  # Epsilon for numerical stability in math operations
+
+# Sampler-specific parameters
+ER_SDE_INTEGRATION_POINTS = 200  # Number of integration points for ER-SDE solver
+SA_SOLVER_START_PERCENT = 0.2  # SA-Solver stochastic interval start (sigma percentile)
+SA_SOLVER_END_PERCENT = 0.8  # SA-Solver stochastic interval end (sigma percentile)
+
+
+def safe_sqrt(x: torch.Tensor, eps: float = EI_EPSILON) -> torch.Tensor:
+    """Numerically stable square root operation.
+
+    Clamps negative values to zero before taking sqrt, then adds epsilon.
+    Used to replace .sqrt().nan_to_num(nan=0.0) pattern.
+
+    Args:
+        x: Input tensor
+        eps: Small value added for stability
+
+    Returns:
+        sqrt(max(x, 0) + eps)
+    """
+    return (x.clamp(min=0) + eps).sqrt()
+
+
 def _is_const(sampling) -> bool:
+    """Check if model uses Rectified Flow (const prediction type)"""
     return sampling.prediction_type == "const"
 
 
-def append_zero(x):
+def append_zero(x: torch.Tensor) -> torch.Tensor:
+    """Appends a zero element to the end of a sigma schedule tensor"""
     return torch.cat([x, x.new_zeros([1])])
 
 
-def get_sigmas_karras(n, sigma_min, sigma_max, rho=7.0, device="cpu"):
+def get_sigmas_karras(
+    n: int,
+    sigma_min: float,
+    sigma_max: float,
+    rho: float = DEFAULT_KARRAS_RHO,
+    device: torch.device | str = "cpu"
+) -> torch.Tensor:
     """Constructs the noise schedule of Karras et al. (2022)"""
     ramp = torch.linspace(0, 1, n, device=device)
     min_inv_rho = sigma_min ** (1 / rho)
@@ -32,34 +101,68 @@ def get_sigmas_karras(n, sigma_min, sigma_max, rho=7.0, device="cpu"):
     return append_zero(sigmas).to(device)
 
 
-def get_sigmas_exponential(n, sigma_min, sigma_max, device="cpu"):
+def get_sigmas_exponential(
+    n: int,
+    sigma_min: float,
+    sigma_max: float,
+    device: torch.device | str = "cpu"
+) -> torch.Tensor:
     """Constructs an exponential noise schedule"""
     sigmas = torch.linspace(math.log(sigma_max), math.log(sigma_min), n, device=device).exp()
     return append_zero(sigmas)
 
 
-def get_sigmas_polyexponential(n, sigma_min, sigma_max, rho=1.0, device="cpu"):
+def get_sigmas_polyexponential(
+    n: int,
+    sigma_min: float,
+    sigma_max: float,
+    rho: float = 1.0,
+    device: torch.device | str = "cpu"
+) -> torch.Tensor:
     """Constructs an polynomial in log sigma noise schedule"""
     ramp = torch.linspace(1, 0, n, device=device) ** rho
     sigmas = torch.exp(ramp * (math.log(sigma_max) - math.log(sigma_min)) + math.log(sigma_min))
     return append_zero(sigmas)
 
 
-def get_sigmas_vp(n, beta_d=19.9, beta_min=0.1, eps_s=1e-3, device="cpu"):
+def get_sigmas_vp(
+    n: int,
+    beta_d: float = VP_BETA_D_DEFAULT,
+    beta_min: float = VP_BETA_MIN_DEFAULT,
+    eps_s: float = VP_EPS_S_DEFAULT,
+    device: torch.device | str = "cpu"
+) -> torch.Tensor:
     """Constructs a continuous VP noise schedule"""
     t = torch.linspace(1, eps_s, n, device=device)
     sigmas = torch.sqrt(torch.special.expm1(beta_d * t**2 / 2 + beta_min * t))
     return append_zero(sigmas)
 
 
-def to_d(x, sigma, denoised):
-    """Converts a denoiser output to a Karras ODE derivative"""
+def to_d(x: torch.Tensor, sigma: torch.Tensor, denoised: torch.Tensor) -> torch.Tensor:
+    """Converts a denoiser output to a Karras ODE derivative.
+
+    Computes (x - denoised) / sigma, which represents the direction to move
+    in the reverse diffusion ODE.
+    """
     return (x - denoised) / utils.append_dims(sigma, x.ndim)
 
 
-def get_ancestral_step(sigma_from, sigma_to, eta=1.0):
+def get_ancestral_step(
+    sigma_from: Union[torch.Tensor, float],
+    sigma_to: Union[torch.Tensor, float],
+    eta: float = 1.0
+) -> Tuple[Union[torch.Tensor, float], Union[torch.Tensor, float]]:
     """Calculates the noise level (sigma_down) to step down to and the amount
-    of noise to add (sigma_up) when doing an ancestral sampling step"""
+    of noise to add (sigma_up) when doing an ancestral sampling step.
+
+    Args:
+        sigma_from: Starting sigma value
+        sigma_to: Target sigma value
+        eta: Stochasticity parameter (0=deterministic, 1=full stochastic)
+
+    Returns:
+        (sigma_down, sigma_up): Deterministic step size and stochastic noise amount
+    """
     if not eta:
         return sigma_to, 0.0
     sigma_up = min(sigma_to, eta * (sigma_to**2 * (sigma_from**2 - sigma_to**2) / sigma_from**2) ** 0.5)
@@ -67,14 +170,123 @@ def get_ancestral_step(sigma_from, sigma_to, eta=1.0):
     return sigma_down, sigma_up
 
 
-def default_noise_sampler(x, seed=None):
+def default_noise_sampler(
+    x: torch.Tensor,
+    seed: Optional[int] = None
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Creates a default noise sampler that generates Gaussian noise.
+
+    Args:
+        x: Template tensor for noise shape, dtype, and device
+        seed: Optional random seed for reproducibility
+
+    Returns:
+        A callable that generates noise: (sigma, sigma_next) -> noise_tensor
+    """
     if seed is not None:
         generator = torch.Generator(device=x.device)
         generator.manual_seed(seed)
     else:
         generator = None
 
-    return lambda sigma, sigma_next: torch.randn(x.size(), dtype=x.dtype, layout=x.layout, device=x.device, generator=generator)
+    return lambda sigma, sigma_next: torch.randn(
+        x.size(), dtype=x.dtype, layout=x.layout, device=x.device, generator=generator
+    )
+
+
+def _ensure_noise_sampler(
+    x: torch.Tensor,
+    noise_sampler: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]],
+    seed: Optional[int] = None
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Ensure a noise sampler is initialized, creating a default if needed.
+
+    Args:
+        x: Template tensor for noise generation
+        noise_sampler: Existing noise sampler or None
+        seed: Optional seed for default noise sampler
+
+    Returns:
+        A noise sampler function
+    """
+    if noise_sampler is not None:
+        return noise_sampler
+    return default_noise_sampler(x, seed=seed)
+
+
+def _make_callback_dict(
+    x: torch.Tensor,
+    i: int,
+    sigma: torch.Tensor,
+    sigma_hat: torch.Tensor,
+    denoised: torch.Tensor
+) -> Dict[str, Any]:
+    """Create a standardized callback dictionary.
+
+    Args:
+        x: Current latent state
+        i: Current step index
+        sigma: Current sigma value
+        sigma_hat: Adjusted sigma (may equal sigma)
+        denoised: Denoised prediction
+
+    Returns:
+        Dictionary with standard callback format
+    """
+    return {
+        "x": x,
+        "i": i,
+        "sigma": sigma,
+        "sigma_hat": sigma_hat,
+        "denoised": denoised,
+    }
+
+
+def _validate_sampler_inputs(func: Callable) -> Callable:
+    """Decorator to validate common sampler inputs.
+
+    Validates:
+    - sigmas tensor is not empty and monotonically decreasing
+    - x has at least 2 dimensions
+    - eta, s_noise, s_churn are non-negative if present
+
+    Args:
+        func: Sampler function to wrap
+
+    Returns:
+        Wrapped function with input validation
+    """
+    from functools import wraps
+
+    @wraps(func)
+    def wrapper(model, x, sigmas, extra_args=None, **kwargs):
+        # Validate sigmas
+        if len(sigmas) == 0:
+            raise ValueError("sigmas tensor must not be empty")
+
+        if len(sigmas) > 1 and not (sigmas[:-1] >= sigmas[1:]).all():
+            raise ValueError("sigmas must be monotonically decreasing")
+
+        # Validate tensor shapes
+        if x.ndim < 2:
+            raise ValueError(f"x must have at least 2 dimensions, got {x.ndim}")
+
+        # Validate eta parameter if present
+        if 'eta' in kwargs and kwargs['eta'] is not None:
+            eta = kwargs['eta']
+            if eta < 0:
+                raise ValueError(f"eta must be non-negative, got {eta}")
+
+        # Validate noise parameters
+        for param in ['s_noise', 's_churn']:
+            if param in kwargs and kwargs[param] is not None:
+                val = kwargs[param]
+                if val < 0:
+                    raise ValueError(f"{param} must be non-negative, got {val}")
+
+        return func(model, x, sigmas, extra_args=extra_args, **kwargs)
+
+    return wrapper
 
 
 class BatchedBrownianTree:
@@ -154,7 +366,7 @@ def half_log_snr_to_sigma(half_log_snr, model_sampling):
     return half_log_snr.neg().exp()
 
 
-def offset_first_sigma_for_snr(sigmas, model_sampling, percent_offset=1e-4):
+def offset_first_sigma_for_snr(sigmas, model_sampling, percent_offset=SIGMA_OFFSET_PERCENT):
     """Adjust the first sigma to avoid invalid logSNR"""
     if len(sigmas) <= 1:
         return sigmas
@@ -176,6 +388,7 @@ def ei_h_phi_2(h: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
+@_validate_sampler_inputs
 def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0.0, s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0):
     """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)"""
     extra_args = {} if extra_args is None else extra_args
@@ -194,7 +407,7 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
         denoised = model(x, sigma_hat * s_in, **extra_args)
         d = to_d(x, sigma_hat, denoised)
         if callback is not None:
-            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigma_hat, "denoised": denoised})
+            callback(_make_callback_dict(x, i, sigmas[i], sigma_hat, denoised))
         dt = sigmas[i + 1] - sigma_hat
         # Euler method
         x = x + d * dt
@@ -202,19 +415,20 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
 
 
 @torch.no_grad()
+@_validate_sampler_inputs
 def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1.0, s_noise=1.0, noise_sampler=None):
     if _is_const(model.inner_model.predictor):
         return sample_euler_ancestral_RF(model, x, sigmas, extra_args, callback, disable, eta, s_noise, noise_sampler)
     """Ancestral sampling with Euler method steps"""
     extra_args = {} if extra_args is None else extra_args
 
-    noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
+    noise_sampler = _ensure_noise_sampler(x, noise_sampler)
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
         if callback is not None:
-            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
+            callback(_make_callback_dict(x, i, sigmas[i], sigmas[i], denoised))
 
         if sigma_down == 0:
             x = denoised
@@ -263,10 +477,8 @@ def sample_heun(model, x, sigmas, extra_args=None, callback=None, disable=None, 
     for i in trange(len(sigmas) - 1, disable=disable):
         if s_churn > 0:
             gamma = min(s_churn / (len(sigmas) - 1), 2**0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.0
-            sigma_hat = sigmas[i] * (gamma + 1)
         else:
             gamma = 0
-            sigma_hat = sigmas[i]
 
         sigma_hat = sigmas[i] * (gamma + 1)
         if gamma > 0:
@@ -970,7 +1182,7 @@ def sample_er_sde(model, x, sigmas, extra_args=None, callback=None, disable=None
         return x * ((x ** 0.3).exp() + 10.0)
 
     noise_scaler = default_er_sde_noise_scaler if noise_scaler is None else noise_scaler
-    num_integration_points = 200.0
+    num_integration_points = float(ER_SDE_INTEGRATION_POINTS)
     point_indice = torch.arange(0, num_integration_points, dtype=torch.float32, device=x.device)
 
     model_sampling = model.inner_model.predictor
@@ -1017,7 +1229,7 @@ def sample_er_sde(model, x, sigmas, extra_args=None, callback=None, disable=None
                 old_denoised_d = denoised_d
 
             if s_noise > 0:
-                x = x + alpha_t * noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * (er_lambda_t ** 2 - er_lambda_s ** 2 * r ** 2).sqrt().nan_to_num(nan=0.0)
+                x = x + alpha_t * noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * safe_sqrt(er_lambda_t ** 2 - er_lambda_s ** 2 * r ** 2)
         old_denoised = denoised
     return x
 
@@ -1166,8 +1378,8 @@ def sample_sa_solver(model, x, sigmas, extra_args=None, callback=None, disable=F
 
     if tau_func is None:
         # Use default interval for stochastic sampling
-        start_sigma = model_sampling.percent_to_sigma(0.2)
-        end_sigma = model_sampling.percent_to_sigma(0.8)
+        start_sigma = model_sampling.percent_to_sigma(SA_SOLVER_START_PERCENT)
+        end_sigma = model_sampling.percent_to_sigma(SA_SOLVER_END_PERCENT)
         tau_func = sa_solver.get_tau_interval_func(start_sigma, end_sigma, eta=1.0)
 
     max_used_order = max(predictor_order, corrector_order)
