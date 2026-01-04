@@ -254,3 +254,10 @@ def join_dicts(base_dict: dict | None, update_dict: dict | None) -> dict:
             result[key] = value
 
     return result
+
+
+def hash_tensor(x: torch.Tensor) -> int:
+    if hasattr(torch, "hash_tensor"):
+        return torch.hash_tensor(x).item()
+    else:
+        return hash(tuple(x.reshape(-1).tolist()))

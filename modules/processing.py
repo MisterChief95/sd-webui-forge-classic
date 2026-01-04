@@ -24,6 +24,7 @@ import modules.sd_vae as sd_vae
 import modules.shared as shared
 from backend import memory_management
 from backend.modules.k_prediction import rescale_zero_terminal_snr_sigmas
+from backend.utils import hash_tensor
 from modules import devices, errors, extra_networks, images, infotext_utils, masking, profiling, prompt_parser, rng, scripts, sd_samplers, sd_samplers_common, sd_unet, sd_vae_approx
 from modules.rng import get_noise_source_type, slerp  # noqa: F401
 from modules.sd_models import apply_token_merging, forge_model_reload
@@ -406,7 +407,7 @@ class StableDiffusionProcessing:
         self.main_prompt = self.all_prompts[0]
         self.main_negative_prompt = self.all_negative_prompts[0]
 
-    def cached_params(self, required_prompts, steps, extra_network_data, hires_steps=None, use_old_scheduling=False):
+    def cached_params(self, required_prompts, steps, extra_network_data, hires_steps, use_old_scheduling):
         """Returns parameters that invalidate the cond cache if changed"""
 
         return (
@@ -424,6 +425,7 @@ class StableDiffusionProcessing:
             self.width,
             self.height,
             opts.emphasis,
+            hash_tensor(self.init_latent) if isinstance(self, StableDiffusionProcessingImg2Img) else None,
         )
 
     def get_conds_with_caching(self, function, required_prompts, steps, caches, extra_network_data, hires_steps=None):
@@ -1980,10 +1982,10 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self.color_corrections = []
         imgs = []
         for img in self.init_images:
+            self.init_img_hash = hashlib.md5(img.tobytes()).hexdigest()
 
             # Save init image
             if opts.save_init_img:
-                self.init_img_hash = hashlib.md5(img.tobytes()).hexdigest()
                 images.save_image(img, path=opts.outdir_init_images, basename=None, forced_filename=self.init_img_hash, save_to_dirs=False, existing_info=img.info)
 
             image = images.flatten(img, opts.img2img_background_color)
