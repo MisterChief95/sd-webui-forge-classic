@@ -1,3 +1,22 @@
+<h1>Fork Overview</h1>
+
+<p>This is a fork of Forge Neo that has some personal modifications in it.</p>
+<h2>Features:</h2>
+
+- Iterative HiRes Fix
+    - Progressively upscales using HiRes Fix until the desired target scale or width/height is reached
+    - Allows linearly interpolating CFG/Denoise/Steps. EX: high denoise for early iterations, low denoise for later
+- Borrows some additional sampler implementations from ComfyUI
+- Adds back FreeU and Perturbed Attention Guidance
+- CFG==1 optimization Toggle
+    - Allows setting CFG as low as 0
+    - Useful for extension/sampler combinations that require very low CFG
+- Tweaked memory tracking
+    - App does its best to only unload/reload models when absolutely necessary
+    - This was added with high VRAM in mind and may not work on low VRAM GPUs    
+
+<hr/>
+
 <h1 align="center">Stable Diffusion WebUI Forge - Neo</h1>
 
 <p align="center"><sup>
