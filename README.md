@@ -41,7 +41,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 
 <br>
 
-## Features [Dec.]
+## Features [Jan.]
 > Most base features of the original [Automatic1111 Webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) should still function
 
 #### New Features
@@ -133,6 +133,8 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 
 - [X] No longer `git` `clone` any repository on fresh install
 - [X] Fix memory leak when switching checkpoints
+- [X] Speed up launch time
+- [X] Improve timer logs
 - [X] Remove unused `cmd_args`
 - [X] Remove unused `args_parser`
 - [X] Remove unused `shared_options`
