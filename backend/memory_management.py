@@ -829,10 +829,10 @@ def free_memory(memory_required, device: torch.device, keep_loaded=[], free_all=
 
     if free_all:
         memory_required = 1e30
-        print(f"[Unload] Trying to free all memory for {device} with {len(keep_loaded)} models keep loaded ... ", end="")
+        print(f"[Unload] Trying to free all memory for {device} with {len(keep_loaded)} models keep loaded ... ")
         offload_everything = True
     else:
-        print(f"[Unload] Trying to free {memory_required / (1024 * 1024):.2f} MB for {device} with {len(keep_loaded)} models keep loaded ... ", end="")
+        print(f"[Unload] Trying to free {memory_required / (1024 * 1024):.2f} MB for {device} with {len(keep_loaded)} models keep loaded ... ")
         offload_everything = ALWAYS_VRAM_OFFLOAD or vram_state is VRAMState.NO_VRAM
 
     unloaded_model = False
@@ -841,7 +841,7 @@ def free_memory(memory_required, device: torch.device, keep_loaded=[], free_all=
         for i in range(len(model_list) - 1, -1, -1):
             if not offload_everything:
                 mem_info = get_free_memory(device, use_cache=True)
-                print(f"Current free memory is {mem_info.mem_free_total / (1024 * 1024):.2f} MB ... ", end="")
+                print(f"  Current free memory is {mem_info.mem_free_total / (1024 * 1024):.2f} MB")
                 if mem_info.mem_free_total > memory_required:
                     break
             shift_model = model_list[i]
@@ -849,7 +849,7 @@ def free_memory(memory_required, device: torch.device, keep_loaded=[], free_all=
                 if shift_model not in keep_loaded:
                     m = current_loaded_models.pop_from_type(model_type, i)
                     if m is not None:
-                        print(f"\n\t-Unload model {m.model.model.__class__.__name__} ")
+                        print(f"    -Unload model {m.model.model.__class__.__name__}")
                         m.model_unload()
                         del m
                         unloaded_model = True
@@ -867,8 +867,6 @@ def free_memory(memory_required, device: torch.device, keep_loaded=[], free_all=
             mem_info = get_free_memory(device, use_cache=True)
             if mem_info.mem_free_torch > mem_info.mem_free_total * 0.25:
                 soft_empty_cache()
-
-    print("Done.")
 
 
 def compute_model_gpu_memory_when_using_cpu_swap(current_free_mem, inference_memory):
