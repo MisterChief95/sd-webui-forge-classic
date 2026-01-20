@@ -612,6 +612,7 @@ def load_models_gpu(models: list["ModelPatcher"], memory_required: float = 0, fo
     models = models_temp
 
     models_to_load: list["LoadedModel"] = []
+    already_loaded_model_ids: set[int] = set()
 
     for x in models:
         loaded_model = LoadedModel(x)
@@ -624,12 +625,18 @@ def load_models_gpu(models: list["ModelPatcher"], memory_required: float = 0, fo
             loaded = current_loaded_models[loaded_model_index]
             loaded.currently_used = True
             models_to_load.append(loaded)
+            already_loaded_model_ids.add(id(loaded))
         else:
             if hasattr(x, "model"):
                 logger.info(f"Requested to load {x.model.__class__.__name__}")
             models_to_load.append(loaded_model)
 
+    # Only check for clones for NEW models that aren't already loaded
     for loaded_model in models_to_load:
+        # Skip clone detection for models that are already in the cache
+        if id(loaded_model) in already_loaded_model_ids:
+            continue
+
         to_unload = []
         for i in range(len(current_loaded_models)):
             if loaded_model.model.is_clone(current_loaded_models[i].model):
@@ -639,22 +646,32 @@ def load_models_gpu(models: list["ModelPatcher"], memory_required: float = 0, fo
             model_to_unload.model.detach(unpatch_all=False)
             model_to_unload.model_finalizer.detach()
 
+    # Only calculate memory requirements for new models that aren't already loaded
     total_memory_required = {}
     for loaded_model in models_to_load:
-        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device, 0) + loaded_model.model_memory_required(loaded_model.device)
+        if id(loaded_model) not in already_loaded_model_ids:
+            total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device, 0) + loaded_model.model_memory_required(loaded_model.device)
 
-    for device in total_memory_required:
-        if device != torch.device("cpu"):
-            free_memory(total_memory_required[device] * 1.1 + extra_mem, device)
+    # Only free memory if we have new models to load
+    if total_memory_required:
+        for device in total_memory_required:
+            if device != torch.device("cpu"):
+                free_memory(total_memory_required[device] * 1.1 + extra_mem, device)
 
-    for device in total_memory_required:
-        if device != torch.device("cpu"):
-            free_mem = get_free_memory(device)
-            if free_mem < minimum_memory_required:
-                models_l = free_memory(minimum_memory_required, device)
-                logger.debug("{} models unloaded.".format(len(models_l)))
+        for device in total_memory_required:
+            if device != torch.device("cpu"):
+                free_mem = get_free_memory(device)
+                if free_mem < minimum_memory_required:
+                    models_l = free_memory(minimum_memory_required, device)
+                    logger.debug("{} models unloaded.".format(len(models_l)))
 
+    # Only load models that aren't already loaded
+    models_actually_loaded = 0
     for loaded_model in models_to_load:
+        if id(loaded_model) in already_loaded_model_ids:
+            continue
+
+        models_actually_loaded += 1
         model = loaded_model.model
         torch_dev = model.load_device
         if is_device_cpu(torch_dev):
@@ -678,8 +695,10 @@ def load_models_gpu(models: list["ModelPatcher"], memory_required: float = 0, fo
         loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
         current_loaded_models.insert(0, loaded_model)
 
-    moving_time = time.perf_counter() - execution_start_time
-    logger.info(f"Moving model(s) has taken {moving_time:.2f} seconds")
+    # Only log timing if models were actually moved
+    if models_actually_loaded > 0:
+        moving_time = time.perf_counter() - execution_start_time
+        logger.info(f"Moving {models_actually_loaded} model(s) has taken {moving_time:.2f} seconds")
 
 
 def load_model_gpu(model: "ModelPatcher"):
