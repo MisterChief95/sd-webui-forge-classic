@@ -1754,7 +1754,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
                 # Memory cleanup
                 devices.torch_gc()
-                memory_management.free_memory(0, torch.device(device=shared.device), for_inference=True)
+                memory_management.free_memory(memory_management.minimum_inference_memory(), torch.device(device=shared.device))
 
         # Restore original parameters
         self.hr_upscale_to_x = final_target_width
