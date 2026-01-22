@@ -67,6 +67,8 @@ vram_state = VRAMState.NORMAL_VRAM
 set_vram_to = VRAMState.NORMAL_VRAM
 cpu_state = CPUState.GPU
 
+VAE_ALWAYS_TILED: bool = False
+
 FLOAT8_TYPES: list[torch.dtype] = []
 
 for dtype in ("e4m3fn", "e4m3fnuz", "e5m2", "e5m2fnuz", "e8m0fnu"):
@@ -1044,6 +1046,17 @@ def pytorch_attention_enabled() -> bool:
 
 def pytorch_attention_enabled_vae() -> bool:
     return ENABLE_PYTORCH_ATTENTION and not is_amd()
+
+
+def pytorch_attention_flash_attention() -> bool:
+    if ENABLE_PYTORCH_ATTENTION:
+        if is_nvidia():
+            return True
+        if is_intel_xpu():
+            return True
+        if is_amd():
+            return True
+    return False
 
 
 def force_upcast_attention_dtype() -> dict[torch.dtype, torch.dtype]:
