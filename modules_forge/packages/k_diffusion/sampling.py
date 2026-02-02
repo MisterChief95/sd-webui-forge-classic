@@ -1,32 +1,7 @@
-# https://github.com/comfyanonymous/ComfyUI/blob/v0.5.0/comfy/k_diffusion/sampling.py
-"""
-K-Diffusion Sampling Methods
-
-This module implements various diffusion model sampling algorithms including:
-- Deterministic: Euler, Heun, DPM-Solver variants
-- Stochastic: Ancestral samplers, SDE variants
-- Advanced: DEIS, SA-Solver, SEEDS, ER-SDE
-- CFG++: Enhanced classifier-free guidance variants
-
-Each sampler follows the standard interface:
-    sampler(model, x, sigmas, extra_args=None, callback=None, disable=None, **kwargs)
-
-For Rectified Flow models (prediction_type="const"), certain samplers automatically
-route to specialized RF variants.
-
-Standard callback dictionary format:
-{
-    "x": torch.Tensor,           # Current latent state
-    "i": int,                    # Current step index
-    "sigma": torch.Tensor,       # Current sigma value
-    "sigma_hat": torch.Tensor,   # Adjusted sigma (may equal sigma)
-    "denoised": torch.Tensor,    # Denoised prediction
-}
-"""
+# https://github.com/comfyanonymous/ComfyUI/blob/v0.3.75/comfy/k_diffusion/sampling.py
 
 import math
 from functools import partial
-from typing import Optional, Callable, Dict, Any, Tuple, Union
 
 import torch
 import torchsde
@@ -35,64 +10,18 @@ from tqdm.auto import trange
 
 from backend.patcher.base import set_model_options_post_cfg_function
 
-from . import deis
-from . import sa_solver
 from . import utils
 
 
-# ============================================================================
-# Constants
-# ============================================================================
-
-# Sigma schedule parameters
-DEFAULT_KARRAS_RHO = 7.0  # Karras et al. (2022) noise schedule rho parameter
-VP_BETA_D_DEFAULT = 19.9  # VP schedule beta_d parameter
-VP_BETA_MIN_DEFAULT = 0.1  # VP schedule beta_min parameter
-VP_EPS_S_DEFAULT = 1e-3  # VP schedule epsilon_s parameter
-
-# Numerical stability
-SIGMA_OFFSET_PERCENT = 1e-4  # Offset to avoid invalid logSNR at sigma boundaries
-EI_EPSILON = 1e-8  # Epsilon for numerical stability in math operations
-
-# Sampler-specific parameters
-ER_SDE_INTEGRATION_POINTS = 200  # Number of integration points for ER-SDE solver
-SA_SOLVER_START_PERCENT = 0.2  # SA-Solver stochastic interval start (sigma percentile)
-SA_SOLVER_END_PERCENT = 0.8  # SA-Solver stochastic interval end (sigma percentile)
-
-
-def safe_sqrt(x: torch.Tensor, eps: float = EI_EPSILON) -> torch.Tensor:
-    """Numerically stable square root operation.
-
-    Clamps negative values to zero before taking sqrt, then adds epsilon.
-    Used to replace .sqrt().nan_to_num(nan=0.0) pattern.
-
-    Args:
-        x: Input tensor
-        eps: Small value added for stability
-
-    Returns:
-        sqrt(max(x, 0) + eps)
-    """
-    return (x.clamp(min=0) + eps).sqrt()
-
-
 def _is_const(sampling) -> bool:
-    """Check if model uses Rectified Flow (const prediction type)"""
     return sampling.prediction_type == "const"
 
 
-def append_zero(x: torch.Tensor) -> torch.Tensor:
-    """Appends a zero element to the end of a sigma schedule tensor"""
+def append_zero(x):
     return torch.cat([x, x.new_zeros([1])])
 
 
-def get_sigmas_karras(
-    n: int,
-    sigma_min: float,
-    sigma_max: float,
-    rho: float = DEFAULT_KARRAS_RHO,
-    device: torch.device | str = "cpu"
-) -> torch.Tensor:
+def get_sigmas_karras(n, sigma_min, sigma_max, rho=7.0, device="cpu"):
     """Constructs the noise schedule of Karras et al. (2022)"""
     ramp = torch.linspace(0, 1, n, device=device)
     min_inv_rho = sigma_min ** (1 / rho)
@@ -101,68 +30,34 @@ def get_sigmas_karras(
     return append_zero(sigmas).to(device)
 
 
-def get_sigmas_exponential(
-    n: int,
-    sigma_min: float,
-    sigma_max: float,
-    device: torch.device | str = "cpu"
-) -> torch.Tensor:
+def get_sigmas_exponential(n, sigma_min, sigma_max, device="cpu"):
     """Constructs an exponential noise schedule"""
     sigmas = torch.linspace(math.log(sigma_max), math.log(sigma_min), n, device=device).exp()
     return append_zero(sigmas)
 
 
-def get_sigmas_polyexponential(
-    n: int,
-    sigma_min: float,
-    sigma_max: float,
-    rho: float = 1.0,
-    device: torch.device | str = "cpu"
-) -> torch.Tensor:
+def get_sigmas_polyexponential(n, sigma_min, sigma_max, rho=1.0, device="cpu"):
     """Constructs an polynomial in log sigma noise schedule"""
     ramp = torch.linspace(1, 0, n, device=device) ** rho
     sigmas = torch.exp(ramp * (math.log(sigma_max) - math.log(sigma_min)) + math.log(sigma_min))
     return append_zero(sigmas)
 
 
-def get_sigmas_vp(
-    n: int,
-    beta_d: float = VP_BETA_D_DEFAULT,
-    beta_min: float = VP_BETA_MIN_DEFAULT,
-    eps_s: float = VP_EPS_S_DEFAULT,
-    device: torch.device | str = "cpu"
-) -> torch.Tensor:
+def get_sigmas_vp(n, beta_d=19.9, beta_min=0.1, eps_s=1e-3, device="cpu"):
     """Constructs a continuous VP noise schedule"""
     t = torch.linspace(1, eps_s, n, device=device)
     sigmas = torch.sqrt(torch.special.expm1(beta_d * t**2 / 2 + beta_min * t))
     return append_zero(sigmas)
 
 
-def to_d(x: torch.Tensor, sigma: torch.Tensor, denoised: torch.Tensor) -> torch.Tensor:
-    """Converts a denoiser output to a Karras ODE derivative.
-
-    Computes (x - denoised) / sigma, which represents the direction to move
-    in the reverse diffusion ODE.
-    """
+def to_d(x, sigma, denoised):
+    """Converts a denoiser output to a Karras ODE derivative"""
     return (x - denoised) / utils.append_dims(sigma, x.ndim)
 
 
-def get_ancestral_step(
-    sigma_from: Union[torch.Tensor, float],
-    sigma_to: Union[torch.Tensor, float],
-    eta: float = 1.0
-) -> Tuple[Union[torch.Tensor, float], Union[torch.Tensor, float]]:
+def get_ancestral_step(sigma_from, sigma_to, eta=1.0):
     """Calculates the noise level (sigma_down) to step down to and the amount
-    of noise to add (sigma_up) when doing an ancestral sampling step.
-
-    Args:
-        sigma_from: Starting sigma value
-        sigma_to: Target sigma value
-        eta: Stochasticity parameter (0=deterministic, 1=full stochastic)
-
-    Returns:
-        (sigma_down, sigma_up): Deterministic step size and stochastic noise amount
-    """
+    of noise to add (sigma_up) when doing an ancestral sampling step"""
     if not eta:
         return sigma_to, 0.0
     sigma_up = min(sigma_to, eta * (sigma_to**2 * (sigma_from**2 - sigma_to**2) / sigma_from**2) ** 0.5)
@@ -170,123 +65,8 @@ def get_ancestral_step(
     return sigma_down, sigma_up
 
 
-def default_noise_sampler(
-    x: torch.Tensor,
-    seed: Optional[int] = None
-) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """Creates a default noise sampler that generates Gaussian noise.
-
-    Args:
-        x: Template tensor for noise shape, dtype, and device
-        seed: Optional random seed for reproducibility
-
-    Returns:
-        A callable that generates noise: (sigma, sigma_next) -> noise_tensor
-    """
-    if seed is not None:
-        generator = torch.Generator(device=x.device)
-        generator.manual_seed(seed)
-    else:
-        generator = None
-
-    return lambda sigma, sigma_next: torch.randn(
-        x.size(), dtype=x.dtype, layout=x.layout, device=x.device, generator=generator
-    )
-
-
-def _ensure_noise_sampler(
-    x: torch.Tensor,
-    noise_sampler: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]],
-    seed: Optional[int] = None
-) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """Ensure a noise sampler is initialized, creating a default if needed.
-
-    Args:
-        x: Template tensor for noise generation
-        noise_sampler: Existing noise sampler or None
-        seed: Optional seed for default noise sampler
-
-    Returns:
-        A noise sampler function
-    """
-    if noise_sampler is not None:
-        return noise_sampler
-    return default_noise_sampler(x, seed=seed)
-
-
-def _make_callback_dict(
-    x: torch.Tensor,
-    i: int,
-    sigma: torch.Tensor,
-    sigma_hat: torch.Tensor,
-    denoised: torch.Tensor
-) -> Dict[str, Any]:
-    """Create a standardized callback dictionary.
-
-    Args:
-        x: Current latent state
-        i: Current step index
-        sigma: Current sigma value
-        sigma_hat: Adjusted sigma (may equal sigma)
-        denoised: Denoised prediction
-
-    Returns:
-        Dictionary with standard callback format
-    """
-    return {
-        "x": x,
-        "i": i,
-        "sigma": sigma,
-        "sigma_hat": sigma_hat,
-        "denoised": denoised,
-    }
-
-
-def _validate_sampler_inputs(func: Callable) -> Callable:
-    """Decorator to validate common sampler inputs.
-
-    Validates:
-    - sigmas tensor is not empty and monotonically decreasing
-    - x has at least 2 dimensions
-    - eta, s_noise, s_churn are non-negative if present
-
-    Args:
-        func: Sampler function to wrap
-
-    Returns:
-        Wrapped function with input validation
-    """
-    from functools import wraps
-
-    @wraps(func)
-    def wrapper(model, x, sigmas, extra_args=None, **kwargs):
-        # Validate sigmas
-        if len(sigmas) == 0:
-            raise ValueError("sigmas tensor must not be empty")
-
-        if len(sigmas) > 1 and not (sigmas[:-1] >= sigmas[1:]).all():
-            raise ValueError("sigmas must be monotonically decreasing")
-
-        # Validate tensor shapes
-        if x.ndim < 2:
-            raise ValueError(f"x must have at least 2 dimensions, got {x.ndim}")
-
-        # Validate eta parameter if present
-        if 'eta' in kwargs and kwargs['eta'] is not None:
-            eta = kwargs['eta']
-            if eta < 0:
-                raise ValueError(f"eta must be non-negative, got {eta}")
-
-        # Validate noise parameters
-        for param in ['s_noise', 's_churn']:
-            if param in kwargs and kwargs[param] is not None:
-                val = kwargs[param]
-                if val < 0:
-                    raise ValueError(f"{param} must be non-negative, got {val}")
-
-        return func(model, x, sigmas, extra_args=extra_args, **kwargs)
-
-    return wrapper
+def default_noise_sampler(x):
+    return lambda sigma, sigma_next: torch.randn_like(x)
 
 
 class BatchedBrownianTree:
@@ -366,7 +146,7 @@ def half_log_snr_to_sigma(half_log_snr, model_sampling):
     return half_log_snr.neg().exp()
 
 
-def offset_first_sigma_for_snr(sigmas, model_sampling, percent_offset=SIGMA_OFFSET_PERCENT):
+def offset_first_sigma_for_snr(sigmas, model_sampling, percent_offset=1e-4):
     """Adjust the first sigma to avoid invalid logSNR"""
     if len(sigmas) <= 1:
         return sigmas
@@ -377,18 +157,7 @@ def offset_first_sigma_for_snr(sigmas, model_sampling, percent_offset=SIGMA_OFFS
     return sigmas
 
 
-def ei_h_phi_1(h: torch.Tensor) -> torch.Tensor:
-    """Compute the result of h*phi_1(h) in exponential integrator methods."""
-    return torch.expm1(h)
-
-
-def ei_h_phi_2(h: torch.Tensor) -> torch.Tensor:
-    """Compute the result of h*phi_2(h) in exponential integrator methods."""
-    return (torch.expm1(h) - h) / h
-
-
 @torch.no_grad()
-@_validate_sampler_inputs
 def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0.0, s_tmin=0.0, s_tmax=float("inf"), s_noise=1.0):
     """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)"""
     extra_args = {} if extra_args is None else extra_args
@@ -407,7 +176,7 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
         denoised = model(x, sigma_hat * s_in, **extra_args)
         d = to_d(x, sigma_hat, denoised)
         if callback is not None:
-            callback(_make_callback_dict(x, i, sigmas[i], sigma_hat, denoised))
+            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigma_hat, "denoised": denoised})
         dt = sigmas[i + 1] - sigma_hat
         # Euler method
         x = x + d * dt
@@ -415,20 +184,19 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
 
 
 @torch.no_grad()
-@_validate_sampler_inputs
 def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1.0, s_noise=1.0, noise_sampler=None):
     if _is_const(model.inner_model.predictor):
         return sample_euler_ancestral_RF(model, x, sigmas, extra_args, callback, disable, eta, s_noise, noise_sampler)
     """Ancestral sampling with Euler method steps"""
     extra_args = {} if extra_args is None else extra_args
 
-    noise_sampler = _ensure_noise_sampler(x, noise_sampler)
+    noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
         if callback is not None:
-            callback(_make_callback_dict(x, i, sigmas[i], sigmas[i], denoised))
+            callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
 
         if sigma_down == 0:
             x = denoised
@@ -477,8 +245,10 @@ def sample_heun(model, x, sigmas, extra_args=None, callback=None, disable=None, 
     for i in trange(len(sigmas) - 1, disable=disable):
         if s_churn > 0:
             gamma = min(s_churn / (len(sigmas) - 1), 2**0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.0
+            sigma_hat = sigmas[i] * (gamma + 1)
         else:
             gamma = 0
+            sigma_hat = sigmas[i]
 
         sigma_hat = sigmas[i] * (gamma + 1)
         if gamma > 0:
@@ -882,57 +652,6 @@ def sample_lcm(model, x, sigmas, extra_args=None, callback=None, disable=None, n
     return x
 
 
-#From https://github.com/zju-pi/diff-sampler/blob/main/diff-solvers-main/solvers.py
-#under Apache 2 license
-@torch.no_grad()
-def sample_deis(model, x, sigmas, extra_args=None, callback=None, disable=None, max_order=3, deis_mode='tab'):
-    extra_args = {} if extra_args is None else extra_args
-    s_in = x.new_ones([x.shape[0]])
-
-    x_next = x
-    t_steps = sigmas
-
-    coeff_list = deis.get_deis_coeff_list(t_steps, max_order, deis_mode=deis_mode)
-
-    buffer_model = []
-    for i in trange(len(sigmas) - 1, disable=disable):
-        t_cur = sigmas[i]
-        t_next = sigmas[i + 1]
-
-        x_cur = x_next
-
-        denoised = model(x_cur, t_cur * s_in, **extra_args)
-        if callback is not None:
-            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
-
-        d_cur = (x_cur - denoised) / t_cur
-
-        order = min(max_order, i+1)
-        if t_next <= 0:
-            order = 1
-
-        if order == 1:          # First Euler step.
-            x_next = x_cur + (t_next - t_cur) * d_cur
-        elif order == 2:        # Use one history point.
-            coeff_cur, coeff_prev1 = coeff_list[i]
-            x_next = x_cur + coeff_cur * d_cur + coeff_prev1 * buffer_model[-1]
-        elif order == 3:        # Use two history points.
-            coeff_cur, coeff_prev1, coeff_prev2 = coeff_list[i]
-            x_next = x_cur + coeff_cur * d_cur + coeff_prev1 * buffer_model[-1] + coeff_prev2 * buffer_model[-2]
-        elif order == 4:        # Use three history points.
-            coeff_cur, coeff_prev1, coeff_prev2, coeff_prev3 = coeff_list[i]
-            x_next = x_cur + coeff_cur * d_cur + coeff_prev1 * buffer_model[-1] + coeff_prev2 * buffer_model[-2] + coeff_prev3 * buffer_model[-3]
-
-        if len(buffer_model) == max_order - 1:
-            for k in range(max_order - 2):
-                buffer_model[k] = buffer_model[k+1]
-            buffer_model[-1] = d_cur.detach()
-        else:
-            buffer_model.append(d_cur.detach())
-
-    return x_next
-
-
 @torch.no_grad()
 def sample_euler_ancestral_cfg_pp(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1.0, s_noise=1.0, noise_sampler=None):
     """Ancestral sampling with Euler method steps (CFG++)"""
@@ -1019,7 +738,7 @@ def sample_dpmpp_2m_cfg_pp(model, x, sigmas, extra_args=None, callback=None, dis
 
 
 @torch.no_grad()
-def res_multistep(model, x, sigmas, extra_args=None, callback=None, disable=None, s_noise=1.0, noise_sampler=None, eta=0.0, cfg_pp=False):
+def res_multistep(model, x, sigmas, extra_args=None, callback=None, disable=None, s_noise=1.0, noise_sampler=None, eta=1.0, cfg_pp=False):
     extra_args = {} if extra_args is None else extra_args
 
     noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
@@ -1085,8 +804,8 @@ def res_multistep(model, x, sigmas, extra_args=None, callback=None, disable=None
 
 
 @torch.no_grad()
-def sample_res_multistep(model, x, sigmas, extra_args=None, callback=None, disable=None, s_noise=1.0, noise_sampler=None, eta=0.0, cfg_pp=False):
-    return res_multistep(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable, s_noise=s_noise, noise_sampler=noise_sampler, eta=eta, cfg_pp=cfg_pp)
+def sample_res_multistep(model, x, sigmas, extra_args=None, callback=None, disable=None, s_noise=1.0, noise_sampler=None):
+    return res_multistep(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable, s_noise=s_noise, noise_sampler=noise_sampler, eta=0.0, cfg_pp=False)
 
 
 @torch.no_grad()
@@ -1123,344 +842,4 @@ def sample_Kohaku_LoNyu_Yog(model, x, sigmas, extra_args=None, callback=None, di
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
         else:
             x = x + d * dt
-    return x
-
-@torch.no_grad()
-def sample_gradient_estimation(model, x, sigmas, extra_args=None, callback=None, disable=None, ge_gamma=2., cfg_pp=False):
-    """Gradient-estimation sampler. Paper: https://openreview.net/pdf?id=o2ND9v0CeK"""
-    extra_args = {} if extra_args is None else extra_args
-    s_in = x.new_ones([x.shape[0]])
-    old_d = None
-
-    uncond_denoised = None
-    def post_cfg_function(args):
-        nonlocal uncond_denoised
-        uncond_denoised = args["uncond_denoised"]
-        return args["denoised"]
-
-    if cfg_pp:
-        model_options = extra_args.get("model_options", {}).copy()
-        extra_args["model_options"] = set_model_options_post_cfg_function(model_options, post_cfg_function, disable_cfg1_optimization=True)
-
-    for i in trange(len(sigmas) - 1, disable=disable):
-        denoised = model(x, sigmas[i] * s_in, **extra_args)
-        if cfg_pp:
-            d = to_d(x, sigmas[i], uncond_denoised)
-        else:
-            d = to_d(x, sigmas[i], denoised)
-        if callback is not None:
-            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
-        dt = sigmas[i + 1] - sigmas[i]
-        if sigmas[i + 1] == 0:
-            # Denoising step
-            x = denoised
-        else:
-            # Euler method
-            if cfg_pp:
-                x = denoised + d * sigmas[i + 1]
-            else:
-                x = x + d * dt
-
-            if i >= 1:
-                # Gradient estimation
-                d_bar = (ge_gamma - 1) * (d - old_d)
-                x = x + d_bar * dt
-        old_d = d
-    return x
-
-@torch.no_grad()
-def sample_er_sde(model, x, sigmas, extra_args=None, callback=None, disable=None, s_noise=1.0, noise_sampler=None, noise_scaler=None, max_stage=3):
-    """Extended Reverse-Time SDE solver (VP ER-SDE-Solver-3). arXiv: https://arxiv.org/abs/2309.06169.
-    Code reference: https://github.com/QinpengCui/ER-SDE-Solver/blob/main/er_sde_solver.py.
-    """
-    extra_args = {} if extra_args is None else extra_args
-    seed = extra_args.get("seed", None)
-    noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
-    s_in = x.new_ones([x.shape[0]])
-
-    def default_er_sde_noise_scaler(x):
-        return x * ((x ** 0.3).exp() + 10.0)
-
-    noise_scaler = default_er_sde_noise_scaler if noise_scaler is None else noise_scaler
-    num_integration_points = float(ER_SDE_INTEGRATION_POINTS)
-    point_indice = torch.arange(0, num_integration_points, dtype=torch.float32, device=x.device)
-
-    model_sampling = model.inner_model.predictor
-    sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
-    half_log_snrs = sigma_to_half_log_snr(sigmas, model_sampling)
-    er_lambdas = half_log_snrs.neg().exp()  # er_lambda_t = sigma_t / alpha_t
-
-    old_denoised = None
-    old_denoised_d = None
-
-    for i in trange(len(sigmas) - 1, disable=disable):
-        denoised = model(x, sigmas[i] * s_in, **extra_args)
-        if callback is not None:
-            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
-        stage_used = min(max_stage, i + 1)
-        if sigmas[i + 1] == 0:
-            x = denoised
-        else:
-            er_lambda_s, er_lambda_t = er_lambdas[i], er_lambdas[i + 1]
-            alpha_s = sigmas[i] / er_lambda_s
-            alpha_t = sigmas[i + 1] / er_lambda_t
-            r_alpha = alpha_t / alpha_s
-            r = noise_scaler(er_lambda_t) / noise_scaler(er_lambda_s)
-
-            # Stage 1 Euler
-            x = r_alpha * r * x + alpha_t * (1 - r) * denoised
-
-            if stage_used >= 2:
-                dt = er_lambda_t - er_lambda_s
-                lambda_step_size = -dt / num_integration_points
-                lambda_pos = er_lambda_t + point_indice * lambda_step_size
-                scaled_pos = noise_scaler(lambda_pos)
-
-                # Stage 2
-                s = torch.sum(1 / scaled_pos) * lambda_step_size
-                denoised_d = (denoised - old_denoised) / (er_lambda_s - er_lambdas[i - 1])
-                x = x + alpha_t * (dt + s * noise_scaler(er_lambda_t)) * denoised_d
-
-                if stage_used >= 3:
-                    # Stage 3
-                    s_u = torch.sum((lambda_pos - er_lambda_s) / scaled_pos) * lambda_step_size
-                    denoised_u = (denoised_d - old_denoised_d) / ((er_lambda_s - er_lambdas[i - 2]) / 2)
-                    x = x + alpha_t * ((dt ** 2) / 2 + s_u * noise_scaler(er_lambda_t)) * denoised_u
-                old_denoised_d = denoised_d
-
-            if s_noise > 0:
-                x = x + alpha_t * noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * safe_sqrt(er_lambda_t ** 2 - er_lambda_s ** 2 * r ** 2)
-        old_denoised = denoised
-    return x
-
-
-@torch.no_grad()
-def sample_seeds_2(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None, r=0.5, solver_type="phi_1"):
-    """SEEDS-2 - Stochastic Explicit Exponential Derivative-free Solvers (VP Data Prediction) stage 2.
-    arXiv: https://arxiv.org/abs/2305.14267 (NeurIPS 2023)
-    """
-    if solver_type not in {"phi_1", "phi_2"}:
-        raise ValueError("solver_type must be 'phi_1' or 'phi_2'")
-
-    extra_args = {} if extra_args is None else extra_args
-    seed = extra_args.get("seed", None)
-    noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
-    s_in = x.new_ones([x.shape[0]])
-    inject_noise = eta > 0 and s_noise > 0
-
-    model_sampling = model.inner_model.predictor
-    sigma_fn = partial(half_log_snr_to_sigma, model_sampling=model_sampling)
-    lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
-    sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
-
-    fac = 1 / (2 * r)
-
-    for i in trange(len(sigmas) - 1, disable=disable):
-        denoised = model(x, sigmas[i] * s_in, **extra_args)
-        if callback is not None:
-            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
-
-        if sigmas[i + 1] == 0:
-            x = denoised
-            continue
-
-        lambda_s, lambda_t = lambda_fn(sigmas[i]), lambda_fn(sigmas[i + 1])
-        h = lambda_t - lambda_s
-        h_eta = h * (eta + 1)
-        lambda_s_1 = torch.lerp(lambda_s, lambda_t, r)
-        sigma_s_1 = sigma_fn(lambda_s_1)
-
-        alpha_s_1 = sigma_s_1 * lambda_s_1.exp()
-        alpha_t = sigmas[i + 1] * lambda_t.exp()
-
-        # Step 1
-        x_2 = sigma_s_1 / sigmas[i] * (-r * h * eta).exp() * x - alpha_s_1 * ei_h_phi_1(-r * h_eta) * denoised
-        if inject_noise:
-            sde_noise = (-2 * r * h * eta).expm1().neg().sqrt() * noise_sampler(sigmas[i], sigma_s_1)
-            x_2 = x_2 + sde_noise * sigma_s_1 * s_noise
-        denoised_2 = model(x_2, sigma_s_1 * s_in, **extra_args)
-
-        # Step 2
-        if solver_type == "phi_1":
-            denoised_d = torch.lerp(denoised, denoised_2, fac)
-            x = sigmas[i + 1] / sigmas[i] * (-h * eta).exp() * x - alpha_t * ei_h_phi_1(-h_eta) * denoised_d
-        elif solver_type == "phi_2":
-            b2 = ei_h_phi_2(-h_eta) / r
-            b1 = ei_h_phi_1(-h_eta) - b2
-            x = sigmas[i + 1] / sigmas[i] * (-h * eta).exp() * x - alpha_t * (b1 * denoised + b2 * denoised_2)
-
-        if inject_noise:
-            segment_factor = (r - 1) * h * eta
-            sde_noise = sde_noise * segment_factor.exp()
-            sde_noise = sde_noise + segment_factor.mul(2).expm1().neg().sqrt() * noise_sampler(sigma_s_1, sigmas[i + 1])
-            x = x + sde_noise * sigmas[i + 1] * s_noise
-    return x
-
-
-@torch.no_grad()
-def sample_seeds_3(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None, r_1=1./3, r_2=2./3):
-    """SEEDS-3 - Stochastic Explicit Exponential Derivative-free Solvers (VP Data Prediction) stage 3.
-    arXiv: https://arxiv.org/abs/2305.14267 (NeurIPS 2023)
-    """
-    extra_args = {} if extra_args is None else extra_args
-    seed = extra_args.get("seed", None)
-    noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
-    s_in = x.new_ones([x.shape[0]])
-    inject_noise = eta > 0 and s_noise > 0
-
-    model_sampling = model.inner_model.predictor
-    sigma_fn = partial(half_log_snr_to_sigma, model_sampling=model_sampling)
-    lambda_fn = partial(sigma_to_half_log_snr, model_sampling=model_sampling)
-    sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
-
-    for i in trange(len(sigmas) - 1, disable=disable):
-        denoised = model(x, sigmas[i] * s_in, **extra_args)
-        if callback is not None:
-            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
-
-        if sigmas[i + 1] == 0:
-            x = denoised
-            continue
-
-        lambda_s, lambda_t = lambda_fn(sigmas[i]), lambda_fn(sigmas[i + 1])
-        h = lambda_t - lambda_s
-        h_eta = h * (eta + 1)
-        lambda_s_1 = torch.lerp(lambda_s, lambda_t, r_1)
-        lambda_s_2 = torch.lerp(lambda_s, lambda_t, r_2)
-        sigma_s_1, sigma_s_2 = sigma_fn(lambda_s_1), sigma_fn(lambda_s_2)
-
-        alpha_s_1 = sigma_s_1 * lambda_s_1.exp()
-        alpha_s_2 = sigma_s_2 * lambda_s_2.exp()
-        alpha_t = sigmas[i + 1] * lambda_t.exp()
-
-        # Step 1
-        x_2 = sigma_s_1 / sigmas[i] * (-r_1 * h * eta).exp() * x - alpha_s_1 * ei_h_phi_1(-r_1 * h_eta) * denoised
-        if inject_noise:
-            sde_noise = (-2 * r_1 * h * eta).expm1().neg().sqrt() * noise_sampler(sigmas[i], sigma_s_1)
-            x_2 = x_2 + sde_noise * sigma_s_1 * s_noise
-        denoised_2 = model(x_2, sigma_s_1 * s_in, **extra_args)
-
-        # Step 2
-        a3_2 = r_2 / r_1 * ei_h_phi_2(-r_2 * h_eta)
-        a3_1 = ei_h_phi_1(-r_2 * h_eta) - a3_2
-        x_3 = sigma_s_2 / sigmas[i] * (-r_2 * h * eta).exp() * x - alpha_s_2 * (a3_1 * denoised + a3_2 * denoised_2)
-        if inject_noise:
-            segment_factor = (r_1 - r_2) * h * eta
-            sde_noise = sde_noise * segment_factor.exp()
-            sde_noise = sde_noise + segment_factor.mul(2).expm1().neg().sqrt() * noise_sampler(sigma_s_1, sigma_s_2)
-            x_3 = x_3 + sde_noise * sigma_s_2 * s_noise
-        denoised_3 = model(x_3, sigma_s_2 * s_in, **extra_args)
-
-        # Step 3
-        b3 = ei_h_phi_2(-h_eta) / r_2
-        b1 = ei_h_phi_1(-h_eta) - b3
-        x = sigmas[i + 1] / sigmas[i] * (-h * eta).exp() * x - alpha_t * (b1 * denoised + b3 * denoised_3)
-        if inject_noise:
-            segment_factor = (r_2 - 1) * h * eta
-            sde_noise = sde_noise * segment_factor.exp()
-            sde_noise = sde_noise + segment_factor.mul(2).expm1().neg().sqrt() * noise_sampler(sigma_s_2, sigmas[i + 1])
-            x = x + sde_noise * sigmas[i + 1] * s_noise
-    return x
-
-@torch.no_grad()
-def sample_sa_solver(model, x, sigmas, extra_args=None, callback=None, disable=False, tau_func=None, s_noise=1.0, noise_sampler=None, predictor_order=3, corrector_order=4, use_pece=False, simple_order_2=False):
-    """Stochastic Adams Solver with predictor-corrector method (NeurIPS 2023)."""
-    if len(sigmas) <= 1:
-        return x
-    extra_args = {} if extra_args is None else extra_args
-    seed = extra_args.get("seed", None)
-    noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
-    s_in = x.new_ones([x.shape[0]])
-
-    model_sampling = model.inner_model.predictor
-    sigmas = offset_first_sigma_for_snr(sigmas, model_sampling)
-    lambdas = sigma_to_half_log_snr(sigmas, model_sampling=model_sampling)
-
-    if tau_func is None:
-        # Use default interval for stochastic sampling
-        start_sigma = model_sampling.percent_to_sigma(SA_SOLVER_START_PERCENT)
-        end_sigma = model_sampling.percent_to_sigma(SA_SOLVER_END_PERCENT)
-        tau_func = sa_solver.get_tau_interval_func(start_sigma, end_sigma, eta=1.0)
-
-    max_used_order = max(predictor_order, corrector_order)
-    x_pred = x  # x: current state, x_pred: predicted next state
-
-    h = 0.0
-    tau_t = 0.0
-    noise = 0.0
-    pred_list = []
-
-    # Lower order near the end to improve stability
-    lower_order_to_end = sigmas[-1].item() == 0
-
-    for i in trange(len(sigmas) - 1, disable=disable):
-        # Evaluation
-        denoised = model(x_pred, sigmas[i] * s_in, **extra_args)
-        if callback is not None:
-            callback({"x": x_pred, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": denoised})
-        pred_list.append(denoised)
-        pred_list = pred_list[-max_used_order:]
-
-        predictor_order_used = min(predictor_order, len(pred_list))
-        if i == 0 or (sigmas[i + 1] == 0 and not use_pece):
-            corrector_order_used = 0
-        else:
-            corrector_order_used = min(corrector_order, len(pred_list))
-
-        if lower_order_to_end:
-            predictor_order_used = min(predictor_order_used, len(sigmas) - 2 - i)
-            corrector_order_used = min(corrector_order_used, len(sigmas) - 1 - i)
-
-        # Corrector
-        if corrector_order_used == 0:
-            # Update by the predicted state
-            x = x_pred
-        else:
-            curr_lambdas = lambdas[i - corrector_order_used + 1:i + 1]
-            b_coeffs = sa_solver.compute_stochastic_adams_b_coeffs(
-                sigmas[i],
-                curr_lambdas,
-                lambdas[i - 1],
-                lambdas[i],
-                tau_t,
-                simple_order_2,
-                is_corrector_step=True,
-            )
-            pred_mat = torch.stack(pred_list[-corrector_order_used:], dim=1)    # (B, K, ...)
-            corr_res = torch.tensordot(pred_mat, b_coeffs, dims=([1], [0]))  # (B, ...)
-            x = sigmas[i] / sigmas[i - 1] * (-(tau_t ** 2) * h).exp() * x + corr_res
-
-            if tau_t > 0 and s_noise > 0:
-                # The noise from the previous predictor step
-                x = x + noise
-
-            if use_pece:
-                # Evaluate the corrected state
-                denoised = model(x, sigmas[i] * s_in, **extra_args)
-                pred_list[-1] = denoised
-
-        # Predictor
-        if sigmas[i + 1] == 0:
-            # Denoising step
-            x = denoised
-        else:
-            tau_t = tau_func(sigmas[i + 1])
-            curr_lambdas = lambdas[i - predictor_order_used + 1:i + 1]
-            b_coeffs = sa_solver.compute_stochastic_adams_b_coeffs(
-                sigmas[i + 1],
-                curr_lambdas,
-                lambdas[i],
-                lambdas[i + 1],
-                tau_t,
-                simple_order_2,
-                is_corrector_step=False,
-            )
-            pred_mat = torch.stack(pred_list[-predictor_order_used:], dim=1)    # (B, K, ...)
-            pred_res = torch.tensordot(pred_mat, b_coeffs, dims=([1], [0]))  # (B, ...)
-            h = lambdas[i + 1] - lambdas[i]
-            x_pred = sigmas[i + 1] / sigmas[i] * (-(tau_t ** 2) * h).exp() * x + pred_res
-
-            if tau_t > 0 and s_noise > 0:
-                noise = noise_sampler(sigmas[i], sigmas[i + 1]) * sigmas[i + 1] * (-2 * tau_t ** 2 * h).expm1().neg().sqrt() * s_noise
-                x_pred = x_pred + noise
     return x
