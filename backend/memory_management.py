@@ -547,9 +547,19 @@ else:
         if total_vram > (15 * 1024):
             EXTRA_RESERVED_VRAM += 100 * 1024 * 1024
 
+SETTING_RESERVED_VRAM = -1
+
+
+def set_reserved_memory(val: float):
+    global SETTING_RESERVED_VRAM
+    SETTING_RESERVED_VRAM = (1.0 - val) * total_vram * 1024 * 1024
+    if SETTING_RESERVED_VRAM == 0.0:
+        return
+    logger.info("Manually Reserving {:0.0f} MB VRAM".format(SETTING_RESERVED_VRAM / (1024 * 1024)))
+
 
 def extra_reserved_memory() -> float:
-    return EXTRA_RESERVED_VRAM
+    return max(SETTING_RESERVED_VRAM, EXTRA_RESERVED_VRAM)
 
 
 def minimum_inference_memory() -> float:
@@ -557,6 +567,11 @@ def minimum_inference_memory() -> float:
 
 
 def free_memory(memory_required: float, device: torch.device, keep_loaded: list["LoadedModel"] = []):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif torch.xpu.is_available():
+        torch.xpu.synchronize()
+
     cleanup_models_gc()
     unloaded_model = []
     can_unload = []
@@ -1298,6 +1313,21 @@ def soft_empty_cache(force=False):
     signal_empty_cache = False
 
 
+def unload_model(model: "ModelPatcher") -> bool:
+    index = None
+    for i, p in enumerate(current_loaded_models):
+        if p.model == model:
+            index = i
+            break
+
+    if index is not None:
+        mdl = current_loaded_models.pop(index)
+        del mdl
+        return True
+
+    return False
+
+
 def unload_all_models():
     free_memory(1e30, get_torch_device())
 
@@ -1471,24 +1501,7 @@ NVIDIA_CONV3D_WORKAROUND = False
 try:
     if is_nvidia():
         cudnn_version = torch.backends.cudnn.version()
-        if (cudnn_version >= 91002 and cudnn_version < 91500) and torch_version_numeric >= (2, 9) and torch_version_numeric <= (2, 10):
+        if (91002 <= cudnn_version < 91500) and ((2, 9) <= torch_version_numeric <= (2, 10)):
             NVIDIA_CONV3D_WORKAROUND = True
 except Exception:
     pass
-else:
-    from functools import wraps
-
-    _forward = torch.nn.Conv3d._conv_forward
-
-    @wraps(_forward)
-    def patched_forward(self, input, weight, bias, *args, **kwargs):
-        if weight.dtype in (torch.float16, torch.bfloat16):
-            out = torch.cudnn_convolution(input, weight, self.padding, self.stride, self.dilation, self.groups, benchmark=False, deterministic=False, allow_tf32=True)
-            if bias is not None:
-                out += bias.reshape((1, -1) + (1,) * (out.ndim - 2))
-            return out
-        else:
-            return _forward(self, input, weight, bias, *args, **kwargs)
-
-    if NVIDIA_CONV3D_WORKAROUND:
-        torch.nn.Conv3d._conv_forward = patched_forward

@@ -238,7 +238,7 @@ class Flux(BASE):
     unet_extra_config = {}
     latent_format = latent.Flux
 
-    memory_usage_factor = 2.8
+    memory_usage_factor = 3.1
 
     supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
 
@@ -280,6 +280,58 @@ class FluxSchnell(Flux):
     }
 
     supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+
+class Flux2K4B(Flux):
+    huggingface_repo = "black-forest-labs/FLUX.2-klein-4B"
+
+    unet_config = {
+        "image_model": "flux2",
+        "hidden_size": 3072,
+    }
+
+    sampling_settings = {
+        "shift": 2.02,
+    }
+
+    unet_extra_config = {}
+    latent_format = latent.Flux2
+
+    memory_usage_factor = 14.6  # 3.1 * (2 * 2) * (3072 / 2604)
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def clip_target(self, state_dict={}):
+        return {"qwen3_4b.transformer": "text_encoder"}
+
+
+class Flux2K9B(Flux):
+    huggingface_repo = "black-forest-labs/FLUX.2-klein-9B"
+
+    unet_config = {
+        "image_model": "flux2",
+        "hidden_size": 4096,
+    }
+
+    sampling_settings = {
+        "shift": 2.02,
+    }
+
+    unet_extra_config = {}
+    latent_format = latent.Flux2
+
+    memory_usage_factor = 19.5  # 3.1 * (2 * 2) * (4096 / 2604)
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def clip_target(self, state_dict={}):
+        return {"qwen3_8b.transformer": "text_encoder"}
 
 
 class Chroma(FluxSchnell):
@@ -362,9 +414,15 @@ class ZImage(Lumina2):
         "shift": 3.0,
     }
 
-    memory_usage_factor = 2.0
+    memory_usage_factor = 2.8
 
-    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    def __init__(self, unet_config):
+        super().__init__(unet_config)
+        if self.unet_config.pop("allow_fp16", False):
+            self.supported_inference_dtypes = ZImage.supported_inference_dtypes.copy()
+            self.supported_inference_dtypes.insert(1, torch.float16)
 
     def clip_target(self, state_dict={}):
         return {"qwen3_4b.transformer": "text_encoder"}
@@ -385,7 +443,7 @@ class WAN21_T2V(BASE):
     unet_extra_config = {}
     latent_format = latent.Wan21
 
-    memory_usage_factor = 1.0
+    memory_usage_factor = 0.9
 
     supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
 
@@ -457,6 +515,8 @@ models = [
     SDXLRefiner,
     Flux,
     FluxSchnell,
+    Flux2K4B,
+    Flux2K9B,
     Chroma,
     Lumina2,
     ZImage,

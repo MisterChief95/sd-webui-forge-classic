@@ -1458,6 +1458,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
                 samples = None
                 decoded_samples = torch.asarray(np.expand_dims(image, 0))
+                decoded_samples = torch.clamp((decoded_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
             else:
                 image = np.array(self.firstpass_image).astype(np.float32) / 255.0
@@ -1498,7 +1499,9 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             devices.torch_gc()
 
             if self.latent_scale_mode is None:
-                decoded_samples = torch.stack(decode_latent_batch(self.sd_model, samples, target_device=devices.cpu, check_for_nans=True)).to(dtype=torch.float32)
+                decoded_samples = decode_latent_batch(self.sd_model, samples, target_device=devices.cpu, check_for_nans=True)
+                decoded_samples = torch.stack(decoded_samples).float()
+                decoded_samples = torch.clamp((decoded_samples + 1.0) / 2.0, min=0.0, max=1.0)
             else:
                 decoded_samples = None
 
@@ -1555,10 +1558,16 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         self.sampler = sd_samplers.create_sampler(img2img_sampler_name, self.sd_model)
 
         if self.latent_scale_mode is not None:
+            if _5d := (len(samples.shape) == 5):
+                samples = samples.squeeze(2)
+
             for i in range(samples.shape[0]):
                 save_intermediate(samples, i)
 
             samples = torch.nn.functional.interpolate(samples, size=(target_height // opt_f, target_width // opt_f), mode=self.latent_scale_mode["mode"], antialias=self.latent_scale_mode["antialias"])
+
+            if _5d:
+                samples = samples.unsqueeze(2)
 
             # Avoid making the inpainting conditioning unless necessary as
             # this does need some extra compute to decode / encode the image again.
@@ -1567,10 +1576,11 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             else:
                 image_conditioning = self.txt2img_image_conditioning(samples)
         else:
-            lowres_samples = torch.clamp((decoded_samples + 1.0) / 2.0, min=0.0, max=1.0)
+            if len(decoded_samples.shape) == 5:
+                decoded_samples = decoded_samples.squeeze(0)
 
             batch_images = []
-            for i, x_sample in enumerate(lowres_samples):
+            for i, x_sample in enumerate(decoded_samples):
                 x_sample = 255.0 * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
                 x_sample = x_sample.astype(np.uint8)
                 image = Image.fromarray(x_sample)
@@ -1869,9 +1879,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     denoising_strength: float = 0.75
     image_cfg_scale: float = None
     mask: Any = None
-    mask_blur_x: int = 4
-    mask_blur_y: int = 4
-    mask_blur: int = None
+    mask_blur: int = 4
     mask_round: bool = True
     inpainting_fill: int = 0
     inpaint_full_res: bool = True
@@ -1899,16 +1907,12 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.initial_noise_multiplier = opts.initial_noise_multiplier if self.initial_noise_multiplier is None else self.initial_noise_multiplier
 
     @property
-    def mask_blur(self):
-        if self.mask_blur_x == self.mask_blur_y:
-            return self.mask_blur_x
-        return None
+    def mask_blur_x(self):
+        return self.mask_blur
 
-    @mask_blur.setter
-    def mask_blur(self, value):
-        if isinstance(value, int):
-            self.mask_blur_x = value
-            self.mask_blur_y = value
+    @property
+    def mask_blur_y(self):
+        return self.mask_blur
 
     def init(self, all_prompts, all_seeds, all_subseeds):
         self.extra_generation_params["Denoising strength"] = self.denoising_strength
@@ -1929,19 +1933,12 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                 image_mask = ImageOps.invert(image_mask)
                 self.extra_generation_params["Mask mode"] = "Inpaint not masked"
 
-            if self.mask_blur_x > 0:
+            if self.mask_blur > 0:
                 np_mask = np.array(image_mask)
-                kernel_size = 2 * int(2.5 * self.mask_blur_x + 0.5) + 1
-                np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), self.mask_blur_x)
+                kernel_size = 2 * int(2.5 * self.mask_blur + 0.5) + 1
+                np_mask = cv2.GaussianBlur(np_mask, (kernel_size, kernel_size), self.mask_blur)
                 image_mask = Image.fromarray(np_mask)
 
-            if self.mask_blur_y > 0:
-                np_mask = np.array(image_mask)
-                kernel_size = 2 * int(2.5 * self.mask_blur_y + 0.5) + 1
-                np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), self.mask_blur_y)
-                image_mask = Image.fromarray(np_mask)
-
-            if self.mask_blur_x > 0 or self.mask_blur_y > 0:
                 self.extra_generation_params["Mask blur"] = self.mask_blur
 
             if self.inpaint_full_res:

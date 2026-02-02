@@ -164,6 +164,7 @@ options_templates.update(
     options_section(
         ("system", "System", "system"),
         {
+            "setting_allocated_vram": OptionInfo(1.0, "GPU Weights", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.05}).info("amount of VRAM that Forge can access").info("in % of total vram"),
             "auto_launch_browser": OptionInfo("Local", "Launch the webui in browser on startup", gr.Radio, {"choices": ("Disable", "Local", "Remote")}).info("Remote = always automatically start; Local = only when not sharing the server, such as <b>--share</b>"),
             "enable_console_prompts": OptionInfo(False, "Print the generation prompts to console"),
             "samples_log_stdout": OptionInfo(False, "Print the generation infotxt to console"),
@@ -333,6 +334,7 @@ options_templates.update(
             "hires_fix_use_firstpass_conds": OptionInfo(False, "For hires fix, calculate conds of second pass using extra networks of first pass."),
             "use_old_scheduling": OptionInfo(False, "Use old prompt editing timelines.", infotext="Old prompt editing timelines").info("For [red:green:N]; old: If N < 1, it's a fraction of steps (and hires fix uses range from 0 to 1), if N >= 1, it's an absolute number of steps; new: If N has a decimal point in it, it's a fraction of steps (and hires fix uses range from 1 to 2), othewrwise it's an absolute number of steps"),
             "use_downcasted_alpha_bar": OptionInfo(False, "Downcast model alphas_cumprod to fp16 before sampling. For reproducing old seeds.", infotext="Downcast alphas_cumprod"),
+            "sdxl_zero_neg": OptionInfo(False, "For SDXL, zero out the conditioning when negative prompt is empty").info("causes NaN when using SageAttention").needs_reload_ui(),
         },
     )
 )
