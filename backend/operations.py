@@ -9,7 +9,7 @@ from typing import Callable
 import torch
 
 from backend import memory_management, stream, utils
-from backend.args import args
+from backend.args import args, dynamic_args
 from backend.patcher.lora import merge_lora_to_weight
 
 
@@ -65,7 +65,7 @@ def get_weight_and_bias(layer: torch.nn.Module) -> tuple[torch.Tensor, torch.Ten
     return weight, bias
 
 
-def weights_manual_cast(layer: torch.nn.Module, x: torch.Tensor, skip_weight_dtype: bool = False, skip_bias_dtype: bool = False, weight_fn: Callable = None, bias_fn: Callable = None, *, dtype: torch.dtype = None, _cast: bool = True):
+def weights_manual_cast(layer: torch.nn.Module, x: torch.Tensor, skip_weight_dtype: bool = False, skip_bias_dtype: bool = False, weight_fn: Callable = None, bias_fn: Callable = None, *, dtype: torch.dtype = None, _cast: bool = True, _scale: bool = True):
     weight, bias = None, None
     target_dtype, target_device = x.dtype, x.device
     weight_has_function: bool = weight_fn is not None
@@ -103,6 +103,9 @@ def weights_manual_cast(layer: torch.nn.Module, x: torch.Tensor, skip_weight_dty
             bias = memory_management.cast_to(layer.bias, **bias_args, copy=bias_has_function, context=context)
 
     memory_management.sync_stream(target_device, offload_stream)
+
+    if not _scale:
+        return weight, bias
 
     weight_a = weight
     bias_a = bias
@@ -167,9 +170,8 @@ class ForgeOperations:
             super().__init__()
             self.in_features = in_features
             self.out_features = out_features
-            self.dummy = torch.nn.Parameter(torch.empty([], device=current_device, dtype=current_dtype))
-            self.weight = torch.empty([], device=current_device, dtype=current_dtype)  # SVDQW4A4Linear.from_linear
-            self.scale_weight = None
+            self.dummy = {"device": current_device, "dtype": current_dtype}
+            self.weight = None
             self.bias = None
             self.scale_weight = None
             self.scale_input = None
@@ -178,10 +180,12 @@ class ForgeOperations:
         def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
             if hasattr(self, "dummy"):
                 if prefix + "weight" in state_dict:
-                    del self.weight
-                    self.weight = torch.nn.Parameter(state_dict[prefix + "weight"].to(self.dummy))
+                    self.weight = torch.nn.Parameter(state_dict[prefix + "weight"].to(**self.dummy))
                 if prefix + "bias" in state_dict:
-                    self.bias = torch.nn.Parameter(state_dict[prefix + "bias"].to(self.dummy))
+                    self.bias = torch.nn.Parameter(state_dict[prefix + "bias"].to(**self.dummy))
+
+                del self.dummy
+
                 if prefix + "scale_weight" in state_dict:
                     self.scale_weight = torch.nn.Parameter(state_dict[prefix + "scale_weight"])
                 elif prefix + "weight_scale" in state_dict:
@@ -190,9 +194,11 @@ class ForgeOperations:
                     self.scale_input = torch.nn.Parameter(state_dict[prefix + "scale_input"])
                 elif prefix + "input_scale" in state_dict:
                     self.scale_input = torch.nn.Parameter(state_dict[prefix + "input_scale"])
-                del self.dummy
             else:
                 super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
+        def reset_parameters(self):
+            return None
 
         def forward(self, x):
             # if self.scale_input is not None:  # TODO ?
@@ -359,6 +365,189 @@ class ForgeOperations:
                 return super().forward(x)
 
 
+# region Int8
+
+from backend.operations_int8 import (
+    dequantize,
+    int8_forward_dynamic,
+    quantize_int8_tensorwise,
+    stochastic_round_int8_delta,
+)
+
+
+class ForgeOperationsInt8(ForgeOperations):
+    """Custom operations for INT8 tensorwise quantization"""
+
+    excluded_names = []
+    _is_prequantized = None
+
+    class Linear(torch.nn.Linear):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.weight_scale = None
+            self._is_quantized = False
+            self.compute_dtype = torch.bfloat16
+            self.lora_A = None
+            self.lora_B = None
+            self.lora_alpha = None
+
+        def reset_parameters(self):
+            return None
+
+        def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+            weight_key = prefix + "weight"
+            scale_key = prefix + "weight_scale"
+            input_scale_key = prefix + "input_scale"
+            bias_key = prefix + "bias"
+
+            weight_scale = state_dict.pop(scale_key, None)
+            state_dict.pop(prefix + "comfy_quant", None)
+            weight_tensor = state_dict.pop(weight_key, None)
+
+            # Pop input_scale to clean state_dict, but ignore it
+            _ = state_dict.pop(input_scale_key, None)
+
+            if weight_tensor is not None:
+                if weight_tensor.dtype == torch.int8 and weight_scale is not None:
+                    # Load Quantized
+                    self._is_quantized = True
+                    self.weight = torch.nn.Parameter(weight_tensor, requires_grad=False)
+                    ForgeOperationsInt8._is_prequantized = True  # Found a quantized layer
+
+                    if isinstance(weight_scale, torch.Tensor):
+                        self.weight_scale = weight_scale.float().item() if weight_scale.numel() == 1 else weight_scale.float()
+                    else:
+                        self.weight_scale = float(weight_scale)
+
+                elif weight_tensor.dtype in (torch.float16, torch.bfloat16, torch.float32):
+                    # Load High-Precision
+                    # Detect if the model is pre-quantized if we don't know yet
+                    if ForgeOperationsInt8._is_prequantized is None:
+                        # Robust detection: scan keys and a sample of values
+                        is_prequant = False
+                        for k in state_dict.keys():
+                            if "weight_scale" in k or "comfy_quant" in k:
+                                is_prequant = True
+                                break
+
+                        if not is_prequant:
+                            # Fallback: scan a sample of values for int8 tensors
+                            for i, v in enumerate(state_dict.values()):
+                                if i > 200:
+                                    break  # Safety limit
+                                if getattr(v, "dtype", None) == torch.int8:
+                                    is_prequant = True
+                                    break
+                        ForgeOperationsInt8._is_prequantized = is_prequant
+
+                    is_excluded = any(ex in prefix for ex in ForgeOperationsInt8.excluded_names)
+                    is_dim1 = self.in_features == 1 or self.out_features == 1 or weight_tensor.ndim == 1
+
+                    if is_excluded or is_dim1 or ForgeOperationsInt8._is_prequantized:
+                        self._is_quantized = False
+                        self.weight = torch.nn.Parameter(weight_tensor, requires_grad=False)
+                    else:
+                        # Quantize on the fly
+                        device = torch.device("cuda") if torch.cuda.is_available() else weight_tensor.device
+                        w_gpu = weight_tensor.to(device, non_blocking=True)
+                        q_weight, q_scale = quantize_int8_tensorwise(w_gpu)
+
+                        self.weight = torch.nn.Parameter(q_weight.cpu(), requires_grad=False)
+                        self.weight_scale = q_scale.cpu() if isinstance(q_scale, torch.Tensor) else q_scale
+                        self._is_quantized = True
+                else:
+                    self._is_quantized = False
+                    self.weight = torch.nn.Parameter(weight_tensor, requires_grad=False)
+            else:
+                missing_keys.append(weight_key)
+
+            bias_tensor = state_dict.pop(bias_key, None)
+            if bias_tensor is not None:
+                self.bias = torch.nn.Parameter(bias_tensor, requires_grad=False)
+            else:
+                self.bias = None
+
+        def convert_weight(self, _weight, inplace=False):
+            if not self._is_quantized:
+                return _weight
+            return self.weight
+
+        def set_weight(self, out_weight, inplace_update=False, seed=0):
+            if not self._is_quantized:
+                if inplace_update:
+                    self.weight.data.copy_(out_weight)
+                else:
+                    self.weight = torch.nn.Parameter(out_weight.to(self.weight.dtype), requires_grad=False)
+                return
+
+            if out_weight.dtype == torch.int8:
+                if inplace_update:
+                    self.weight.data.copy_(out_weight)
+                else:
+                    self.weight = torch.nn.Parameter(out_weight, requires_grad=False)
+                return
+
+            # Re-quantize if fallback occurred
+            new_weight = stochastic_round_int8_delta(out_weight, self.weight_scale, seed)
+            if inplace_update:
+                self.weight.data.copy_(new_weight)
+            else:
+                self.weight = torch.nn.Parameter(new_weight, requires_grad=False)
+
+        def set_bias(self, out_bias, inplace_update=False, seed=0):
+            if out_bias is None:
+                return
+            if inplace_update:
+                if self.bias is not None:
+                    self.bias.data.copy_(out_bias)
+            else:
+                self.bias = torch.nn.Parameter(out_bias, requires_grad=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Fast forward using torch._int_mm for quantized weights."""
+
+            if not self._is_quantized:
+                weight, bias, signal = weights_manual_cast(self, x)
+                with main_stream_worker(weight, bias, signal):
+                    return torch.nn.functional.linear(x, weight, bias)
+
+            # 1. Move weight/bias/scale to device (non_blocking)
+            weight = self.weight.to(x.device, non_blocking=True)
+            bias = self.bias.to(x.device, non_blocking=True) if self.bias is not None else None
+
+            w_scale = self.weight_scale
+            if isinstance(w_scale, torch.Tensor):
+                w_scale = w_scale.to(x.device, non_blocking=True)
+
+            compute_dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
+
+            x_shape = x.shape
+            x_2d = x.reshape(-1, x_shape[-1])
+
+            if x_2d.shape[0] > 16:
+                y = int8_forward_dynamic(x_2d, weight, w_scale, bias, compute_dtype)
+            else:
+                # Small batch fallback
+                w_float = dequantize(weight, w_scale).to(x.dtype)
+                y = torch.nn.functional.linear(x_2d, w_float, bias)
+
+            # Dynamic LoRA Path
+            if self.lora_A is not None and self.lora_B is not None:
+                # Ensure LoRA tensors are on the same device as x
+                lA = self.lora_A.to(x.device, non_blocking=True)
+                lB = self.lora_B.to(x.device, non_blocking=True)
+
+                lora_x = torch.nn.functional.linear(x_2d.to(lA.dtype), lA)
+                lora_y = torch.nn.functional.linear(lora_x, lB)
+
+                if self.lora_alpha is not None:
+                    lora_y = lora_y * self.lora_alpha
+
+                y = y + lora_y.to(y.dtype)
+
+            return y.reshape(*x_shape[:-1], y.shape[-1])
+
+
 # region BnB
 
 
@@ -411,21 +600,22 @@ class ForgeOperationsGGUF(ForgeOperations):
     class Linear(torch.nn.Module):
         def __init__(self, *args, **kwargs):
             super().__init__()
-            self.dummy = torch.nn.Parameter(torch.empty([], device=current_device, dtype=current_dtype))
+            self.dummy = {"device": current_device, "dtype": current_dtype}
             self.weight = None
             self.bias = None
 
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             if hasattr(self, "dummy"):
-                computation_dtype = self.dummy.dtype
-                if computation_dtype not in [torch.float16, torch.bfloat16]:
+                if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
                     computation_dtype = torch.float16
+
                 if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"].to(device=self.dummy.device)
+                    self.weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
                     self.weight.computation_dtype = computation_dtype
                 if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"].to(device=self.dummy.device)
+                    self.bias = state_dict[prefix + "bias"].to(device=self.dummy["device"])
                     self.bias.computation_dtype = computation_dtype
+
                 del self.dummy
             else:
                 if prefix + "weight" in state_dict:
@@ -453,17 +643,19 @@ class ForgeOperationsGGUF(ForgeOperations):
             kwargs["device"] = current_device
             kwargs["dtype"] = current_dtype
             super().__init__(*args, **kwargs)
-            self.dummy = torch.nn.Parameter(torch.empty([], device=current_device, dtype=current_dtype))
+            self.dummy = {"device": current_device, "dtype": current_dtype}
+            self.weight = None
             self.bias = None
 
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             if hasattr(self, "dummy"):
-                computation_dtype = self.dummy.dtype
-                if computation_dtype not in [torch.float16, torch.bfloat16]:
+                if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
                     computation_dtype = torch.float16
+
                 if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"].to(device=self.dummy.device)
+                    self.weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
                     self.weight.computation_dtype = computation_dtype
+
                 del self.dummy
             else:
                 if prefix + "weight" in state_dict:
@@ -521,17 +713,16 @@ def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
     input_shape, input_dtype = input.shape, input.dtype
 
     if len(input.shape) == 3:
-        w, bias, s = weights_manual_cast(self, input, dtype=dtype)
+        w, bias = weights_manual_cast(self, input, dtype=dtype, _scale=False)
         w = w.t()
 
-        scale_weight: torch.Tensor = getattr(self, "scale_weight", None)
-
-        if scale_weight is None:
+        if getattr(self, "scale_weight", None) is None:
             scale_weight = torch.ones((), device=input.device, dtype=torch.float32)
         else:
-            scale_weight = scale_weight.to(input.device)
+            scale_weight = self.scale_weight.to(input.device)
 
-        scale_input = torch.ones((), device=input.device, dtype=torch.float32)
+        scale_input = torch.ones((), device=input.device, dtype=torch.float32)  # TODO ?
+
         input = torch.clamp(input, min=-448, max=448, out=input)
         input = input.reshape(-1, input_shape[2]).to(dtype).contiguous()
 
@@ -572,7 +763,28 @@ def using_forge_operations(operations=None, device=None, dtype=None, manual_cast
 
     if operations is False:
         operations = ForgeOperationsNunchaku
-    elif operations is None:
+    elif isinstance(bnb_dtype, str):
+        # https://github.com/BobJohnson24/ComfyUI-Flux2-INT8/blob/main/int8_unet_loader.py
+        ForgeOperationsInt8._is_prequantized = None
+
+        match bnb_dtype:
+            case "Flux2K4B" | "Flux2K9B":
+                ForgeOperationsInt8.excluded_names = ["img_in", "time_in", "guidance_in", "txt_in", "final_layer", "double_stream_modulation_img", "double_stream_modulation_txt", "single_stream_modulation"]
+                operations = ForgeOperationsInt8
+            case "ZImage":
+                ForgeOperationsInt8.excluded_names = ["cap_embedder", "t_embedder", "x_embedder", "cap_pad_token", "context_refiner", "final_layer", "noise_refiner", "adaLN", "x_pad_token"]
+                operations = ForgeOperationsInt8
+            case "Chroma":
+                ForgeOperationsInt8.excluded_names = ["distilled_guidance_layer", "final_layer", "img_in", "txt_in", "nerf_image_embedder", "nerf_blocks", "nerf_final_layer_conv", "__x0__", "nerf_final_layer_conv"]
+                operations = ForgeOperationsInt8
+            case "QwenImage":
+                ForgeOperationsInt8.excluded_names = ["time_text_embed", "img_in", "norm_out", "proj_out", "txt_in"]
+                operations = ForgeOperationsInt8
+            case "WAN21_T2V" | "WAN21_I2V":
+                ForgeOperationsInt8.excluded_names = ["patch_embedding", "text_embedding", "time_embedding", "time_projection" "head", "img_emb"]
+                operations = ForgeOperationsInt8
+
+    if operations is None:
         if bnb_dtype in [torch.float8_e4m3fn] and args.fast_fp8 and memory_management.supports_fp8_compute(memory_management.get_torch_device()):
             operations = fp8Operations
         elif bnb_dtype in ["gguf"]:
@@ -583,7 +795,13 @@ def using_forge_operations(operations=None, device=None, dtype=None, manual_cast
         else:
             operations = ForgeOperations
 
-    op_names = ["Linear", "Conv1d", "Conv2d", "Conv3d", "GroupNorm", "LayerNorm", "RMSNorm", "Embedding"]
+    if operations is ForgeOperationsInt8:
+        memory_management.logger.info("Quantizing to int8...")
+
+    if dynamic_args["ops"] is None:
+        dynamic_args["ops"] = str(operations.__name__)
+
+    op_names = ("Linear", "Conv1d", "Conv2d", "Conv3d", "GroupNorm", "LayerNorm", "RMSNorm", "Embedding")
     backups = {op_name: getattr(torch.nn, op_name) for op_name in op_names}
 
     try:
@@ -595,14 +813,6 @@ def using_forge_operations(operations=None, device=None, dtype=None, manual_cast
     finally:
         for op_name in op_names:
             setattr(torch.nn, op_name, backups[op_name])
-    return
-
-
-def shift_manual_cast(model, enabled):
-    for m in model.modules():
-        if hasattr(m, "parameters_manual_cast"):
-            m.parameters_manual_cast = enabled
-    return
 
 
 from functools import wraps
