@@ -36,7 +36,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 
 <br>
 
-"**Neo**" mainly serves as an continuation for the "`latest`" version of Forge, which was built on [Gradio](https://github.com/gradio-app/gradio) `4.40.0` before lllyasviel became too busy... Additionally, this fork is focused on optimization and usability, with the main goal of being the lightest WebUI without any bloatwares.
+"**Neo**" mainly serves as an continuation for the "`latest`" version of Forge, which was built on [Gradio](https://github.com/gradio-app/gradio) `4.40.0` before lllyasviel became too busy... Additionally, this fork is focused on optimization and usability, with the main goal of being able to run the latest models without any bloatwares.
 
 > [!Tip]
 > [How to Install](#installation)
@@ -48,6 +48,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 
 #### New Features
 
+- [X] Support [Anima](https://huggingface.co/circlestone-labs/Anima)
 - [X] Support [Flux.2-Klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)
     - `4B`, `9B`
     - `txt2img`, `img2img`, `inpaint`
@@ -91,7 +92,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 <br>
 
 - [X] Rewrite Preset System
-    - now actually remembers the checkpoint/module selection and parameters for each preset
+    - now remembers the checkpoint/module selection and parameters for each preset
 - [X] Support [uv](https://github.com/astral-sh/uv) package manager
     - requires **manually** installing [uv](https://github.com/astral-sh/uv/releases)
     - drastically speed up installation
@@ -160,8 +161,10 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - hotkeys
 - [X] Optimize upscaler logics
 - [X] Optimize certain operations in `Spandrel`
+- [X] Speed up model loading
 - [X] Improve memory management
 - [X] Improve color correction
+- [X] Update the implementation for `MultiDiffusion`
 - [X] Update the implementation for `uni_pc` and `LCM` samplers
 - [X] Update the implementation of LoRAs
 - [X] Revamp settings
@@ -182,15 +185,14 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Update `protobuf`
     - faster `insightface` loading
 - [X] Update to latest PyTorch
-    - `torch==2.9.1+cu130`
-    - `xformers==0.0.33`
+    - `torch==2.10.0+cu130`
 
 > [!Note]
 > If your GPU does not support the latest PyTorch, manually [install](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Extra-Installations#older-pytorch) older version of PyTorch
 
 - [X] No longer install `open-clip` twice
 - [X] Update some packages to newer versions
-- [X] Update recommended Python to `3.11.9`
+- [X] Update recommended Python to `3.13.12`
 - [X] many more... :tm:
 
 <br>
@@ -228,10 +230,12 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 > This simply **replaces** the `models` folder, rather than adding on top of it
 
 - `--forge-ref-a1111-home`: Point to an Automatic1111 installation to load its `models` folders
-    - **i.e.** `Stable-diffusion`, `text_encoder`
+    - **i.e.** `Stable-diffusion`, `text_encoder`, etc.
 
 - `--forge-ref-comfy-home`: Point to a ComfyUI installation to load its `models` folders
-    - **i.e.** `diffusion_models`, `clip`
+    - **i.e.** `diffusion_models`, `clip`, etc.
+- `--forge-ref-comfy-yaml`: Point to the ComfyUI `extra_model_paths.yaml` to load its configurations
+    - **i.e.** `base_path`, `checkpoints`, etc.
 
 <br>
 
@@ -270,7 +274,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - Set up **venv**
     ```bash
     cd sd-webui-forge-neo
-    uv venv venv --python 3.11 --seed
+    uv venv venv --python 3.13 --seed
     ```
 - Add the `--uv` flag to `webui-user.bat`
 
@@ -281,7 +285,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 <details>
 <summary>Deprecated Method</summary>
 
-- Install **[Python 3.11.9](https://www.python.org/downloads/release/python-3119/)**
+- Install **[Python 3.13.12](https://www.python.org/downloads/release/python-31312/)**
     - Remember to enable `Add Python to PATH`
 
 </details>

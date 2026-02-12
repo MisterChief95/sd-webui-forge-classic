@@ -22,7 +22,7 @@ import modules.paths as paths
 import modules.sd_models as sd_models
 import modules.sd_vae as sd_vae
 import modules.shared as shared
-from backend import memory_management
+from backend import args, memory_management
 from backend.modules.k_prediction import rescale_zero_terminal_snr_sigmas
 from backend.utils import hash_tensor
 from modules import devices, errors, extra_networks, images, infotext_utils, masking, profiling, prompt_parser, rng, scripts, sd_samplers, sd_samplers_common, sd_unet, sd_vae_approx
@@ -376,8 +376,7 @@ class StableDiffusionProcessing:
         self.c = None
         self.uc = None
         if not opts.persistent_cond_cache:
-            StableDiffusionProcessing.cached_c = [None, None]
-            StableDiffusionProcessing.cached_uc = [None, None]
+            self.clear_prompt_cache()
 
     def get_token_merging_ratio(self, for_hr=False):
         if for_hr:
@@ -818,6 +817,8 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
         if sd_models.checkpoint_aliases.get(p.override_settings.get("sd_model_checkpoint")) is None:
             p.override_settings.pop("sd_model_checkpoint", None)
 
+        _vae_override = p.override_settings.pop("sd_vae", None)
+
         # apply any options overrides
         set_config(p.override_settings, is_api=True, run_callbacks=False, save_config=False)
 
@@ -827,6 +828,7 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             pass
         else:
             manage_model_and_prompt_cache(p)
+            sd_vae.reload_vae_weights(_vae_override)
 
         # backwards compatibility, fix sampler and scheduler if invalid
         sd_samplers.fix_p_invalid_sampler_and_scheduler(p)
@@ -838,6 +840,8 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
         # restore original options
         if p.override_settings_restore_afterwards:
             set_config(stored_opts, save_config=False)
+        if _vae_override is not None:
+            sd_vae.restore_vae_weights()
 
     return res
 
@@ -845,9 +849,10 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
 def process_images_inner(p: StableDiffusionProcessing) -> Processed:
     """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
 
+    _times = 1
     _is_video = False
     video_path = None
-    if shared.sd_model.is_wan:
+    if shared.sd_model.is_wan and args.dynamic_args["wan"]:
         _times = ((getattr(p, "batch_size", 1) - 1) // 4) + 1  # https://github.com/comfyanonymous/ComfyUI/blob/v0.3.64/comfy_extras/nodes_wan.py#L41
         p.batch_size = (_times - 1) * 4 + 1
         _is_video: bool = _times > 1
@@ -1472,7 +1477,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             # here we generate an image normally
 
             x = self.rng.next()
-            if shared.sd_model.is_wan:  # enforce batch_size of 1
+            if shared.sd_model.is_wan and args.dynamic_args["wan"]:  # enforce batch_size of 1
                 x = x[0].unsqueeze(0)
 
             self.sd_model.forge_objects = self.sd_model.forge_objects_after_applying_lora.shallow_copy()
@@ -2074,7 +2079,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
         x = self.rng.next()
-        if shared.sd_model.is_wan:  # enforce batch_size of 1
+        if shared.sd_model.is_wan and args.dynamic_args["wan"]:  # enforce batch_size of 1
             x = x[0].unsqueeze(0)
 
         if self.initial_noise_multiplier != 1.0:
