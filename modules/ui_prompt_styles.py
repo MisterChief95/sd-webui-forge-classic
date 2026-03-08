@@ -2,9 +2,9 @@ import gradio as gr
 
 from modules import shared, ui_common, ui_components, styles
 
-styles_edit_symbol = '\U0001f58c\uFE0F'  # 🖌️
-styles_materialize_symbol = '\U0001f4cb'  # 📋
-styles_copy_symbol = '\U0001f4dd'  # 📝
+styles_edit_symbol = "\U0001f58c\ufe0f"  # 🖌️
+styles_materialize_symbol = "\U0001f4cb"  # 📋
+styles_copy_symbol = "\U0001f4dd"  # 📝
 
 
 def select_style(name):
@@ -39,7 +39,7 @@ def delete_style(name):
     shared.prompt_styles.styles.pop(name, None)
     shared.prompt_styles.save_styles()
 
-    return '', '', ''
+    return "", "", ""
 
 
 def materialize_styles(prompt, negative_prompt, styles):
@@ -63,7 +63,7 @@ class UiPromptStyles:
             self.dropdown = gr.Dropdown(label="Styles", show_label=False, elem_id=f"{tabname}_styles", choices=list(shared.prompt_styles.styles), value=[], multiselect=True, tooltip="Styles")
             edit_button = ui_components.ToolButton(value=styles_edit_symbol, elem_id=f"{tabname}_styles_edit_button", tooltip="Edit styles")
 
-        with gr.Box(elem_id=f"{tabname}_styles_dialog", elem_classes="popup-dialog") as styles_dialog:
+        with gr.Group(elem_id=f"{tabname}_styles_dialog", elem_classes="popup-dialog") as styles_dialog:
             with gr.Row():
                 self.selection = gr.Dropdown(label="Styles", elem_id=f"{tabname}_styles_edit_select", choices=list(shared.prompt_styles.styles), value=[], allow_custom_value=True, info="Styles allow you to add custom text to prompt. Use the {prompt} token in style text, and it will be replaced with user's prompt when applying style. Otherwise, style's text will be added to the end of the prompt.")
                 ui_common.create_refresh_button([self.dropdown, self.selection], shared.prompt_styles.reload, lambda: {"choices": list(shared.prompt_styles.styles)}, f"refresh_{tabname}_styles")
@@ -71,15 +71,15 @@ class UiPromptStyles:
                 self.copy = ui_components.ToolButton(value=styles_copy_symbol, elem_id=f"{tabname}_style_copy", tooltip="Copy main UI prompt to style.")
 
             with gr.Row():
-                self.prompt = gr.Textbox(label="Prompt", show_label=True, elem_id=f"{tabname}_edit_style_prompt", lines=3, elem_classes=["prompt"])
+                self.prompt = gr.Textbox(label="Prompt", show_label=True, elem_id=f"{tabname}_edit_style_prompt", lines=4, max_lines=16, elem_classes=["prompt"])
 
             with gr.Row():
-                self.neg_prompt = gr.Textbox(label="Negative prompt", show_label=True, elem_id=f"{tabname}_edit_style_neg_prompt", lines=3, elem_classes=["prompt"])
+                self.neg_prompt = gr.Textbox(label="Negative prompt", show_label=True, elem_id=f"{tabname}_edit_style_neg_prompt", lines=4, max_lines=16, elem_classes=["prompt"])
 
             with gr.Row():
-                self.save = gr.Button('Save', variant='primary', elem_id=f'{tabname}_edit_style_save', visible=False)
-                self.delete = gr.Button('Delete', variant='primary', elem_id=f'{tabname}_edit_style_delete', visible=False)
-                self.close = gr.Button('Close', variant='secondary', elem_id=f'{tabname}_edit_style_close')
+                self.save = gr.Button("Save", variant="primary", elem_id=f"{tabname}_edit_style_save", visible=False)
+                self.delete = gr.Button("Delete", variant="primary", elem_id=f"{tabname}_edit_style_delete", visible=False)
+                self.close = gr.Button("Close", variant="secondary", elem_id=f"{tabname}_edit_style_close")
 
         self.selection.change(
             fn=select_style,
@@ -120,4 +120,4 @@ class UiPromptStyles:
             inputs=[self.main_ui_prompt, self.main_ui_negative_prompt, self.dropdown],
             outputs=[self.main_ui_prompt, self.main_ui_negative_prompt, self.dropdown],
             show_progress=False,
-        ).then(fn=None, _js="function(){update_"+self.tabname+"_tokens(); closePopup();}", show_progress=False)
+        ).then(fn=None, _js="function(){update_" + self.tabname + "_tokens(); closePopup();}", show_progress=False)

@@ -1125,7 +1125,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                             output_images.append(image_mask_composite)
 
             if _is_video:
-                video_path = images.save_video(p, frames)
+                video_path = images.save_video(p, frames, info=infotext(use_main_prompt=True))
                 del frames
 
             del x_samples_ddim
@@ -1471,6 +1471,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                     self.extra_generation_params["VAE Encoder"] = opts.sd_vae_encode_method
 
                 samples = images_tensor_to_samples(image, approximation_indexes.get(opts.sd_vae_encode_method), self.sd_model)
+                self.sd_model.ini_latent = None  # Edit Model
                 decoded_samples = None
                 devices.torch_gc()
 
@@ -1598,7 +1599,10 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
             if opts.sd_vae_encode_method != "Full":
                 self.extra_generation_params["VAE Encoder"] = opts.sd_vae_encode_method
+
             samples = images_tensor_to_samples(decoded_samples, approximation_indexes.get(opts.sd_vae_encode_method))
+            self.sd_model.ini_latent = None  # Edit Model
+            devices.torch_gc()
 
             image_conditioning = self.img2img_image_conditioning(decoded_samples, samples)
 

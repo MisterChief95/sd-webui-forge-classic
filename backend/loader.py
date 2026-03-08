@@ -135,7 +135,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                     with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True):
                         model = Qwen25_7BVLI(config)
 
-            load_state_dict(model, state_dict, log_name=cls_name, ignore_errors=["lm_head.weight"])
+            load_state_dict(model, state_dict, log_name=cls_name, ignore_start="lm_head.")
             return model
         if cls_name == "Gemma2Model":
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have Gemma2 state dict!"
@@ -165,7 +165,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                     with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True):
                         model = Gemma2_2B(config)
 
-            load_state_dict(model, state_dict, log_name=cls_name)
+            load_state_dict(model, state_dict, log_name=cls_name, ignore_start="lm_head.")
             return model
         if cls_name in ["Qwen3Model", "Qwen3ForCausalLM"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have Qwen3 state dict!"
@@ -200,7 +200,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                     with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True):
                         model = QTE(config)
 
-            load_state_dict(model, state_dict, log_name=cls_name)
+            load_state_dict(model, state_dict, log_name=cls_name, ignore_start="lm_head.")
             return model
         if cls_name in ["T5EncoderModel", "UMT5EncoderModel"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have T5 state dict!"
@@ -631,6 +631,15 @@ def preprocess_state_dict(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor
     return sd
 
 
+def process_anima(dit: dict[str, torch.Tensor], enc: dict[str, torch.Tensor]):
+    # move LLMAdapter from transformer to text_encoder
+
+    keys = list(dit.keys())
+    for k in keys:
+        if k.startswith("llm_adapter"):
+            enc[k] = dit.pop(k)
+
+
 def split_state_dict(sd, additional_state_dicts: list = None):
     import huggingface_guess
 
@@ -672,6 +681,9 @@ def split_state_dict(sd, additional_state_dicts: list = None):
 
     state_dict["ignore"] = sd
 
+    if "Anima" in guess.huggingface_repo:
+        process_anima(state_dict["transformer"], state_dict["text_encoder"])
+
     print_dict = {k: len(v) for k, v in state_dict.items()}
     logger.debug(f"StateDict Keys: {print_dict}")
 
@@ -691,6 +703,9 @@ def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = No
         raise ValueError("Failed to recognize model type!")
 
     repo_name = estimated_config.huggingface_repo
+    if "xl" in repo_name and "rectified" in str(sd).lower():
+        estimated_config.sampling_settings["RF"] = True
+
     backend.args.dynamic_args["kontext"] = "kontext" in str(sd).lower()
     backend.args.dynamic_args["edit"] = "qwen" in str(sd).lower() and "edit" in str(sd).lower()
     backend.args.dynamic_args["nunchaku"] = getattr(estimated_config, "nunchaku", False)

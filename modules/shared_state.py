@@ -23,8 +23,9 @@ class State:
     job_count = 0
     processing_has_refined_job_count = False
     job_timestamp = "0"
-    sampling_step = 0
-    sampling_steps = 0
+    preview_step: int = 0
+    sampling_step: int = 0
+    sampling_steps: int = 0
     current_latent = None
     current_image = None
     current_image_sampling_step = 0
@@ -98,6 +99,7 @@ class State:
 
         self.job_no += 1
         self.sampling_step = 0
+        self.preview_step = 0
         self.current_image_sampling_step = 0
 
     def dict(self):
@@ -117,13 +119,14 @@ class State:
 
     def begin(self, job: str = "(unknown)"):
         self.sampling_step = 0
+        self.preview_step = 0
         self.time_start = time.time()
         self.job_count = -1
         self.processing_has_refined_job_count = False
         self.job_no = 0
         self.job_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        self.current_latent = None
-        self.current_image = None
+        self.current_latent: torch.Tensor = None
+        self.current_image: Image.Image = None
         self.current_image_sampling_step = 0
         self.id_live_preview = 0
         self.skipped = False
@@ -144,11 +147,11 @@ class State:
 
     @torch.inference_mode()
     def set_current_image(self):
-        """if enough sampling steps have been made after the last call to this, sets self.current_image from self.current_latent, and modifies self.id_live_preview accordingly"""
-        if not shared.parallel_processing_allowed:
+        if not shared.opts.live_previews_enable or shared.opts.show_progress_every_n_steps == -1:
             return
-
-        if self.sampling_step - self.current_image_sampling_step >= shared.opts.show_progress_every_n_steps and shared.opts.live_previews_enable and shared.opts.show_progress_every_n_steps != -1:
+        if self.preview_step >= self.sampling_steps:
+            return
+        if self.preview_step - self.current_image_sampling_step >= shared.opts.show_progress_every_n_steps:
             self.do_set_current_image()
 
     @torch.inference_mode()
@@ -159,13 +162,17 @@ class State:
         import modules.sd_samplers
 
         try:
+            _video: bool = self.current_latent.ndim == 5 and self.current_latent.size(2) > 1
+
             vae_context = nullcontext()
             if self.vae_stream is not None:
                 self.vae_stream.wait_stream(stream.current_stream)
                 vae_context = stream.stream_context()(self.vae_stream)
 
             with vae_context:
-                if shared.opts.show_progress_grid:
+                if _video:
+                    self.assign_current_image(modules.sd_samplers.sample_to_video(self.current_latent))
+                elif shared.opts.show_progress_grid:
                     self.assign_current_image(modules.sd_samplers.samples_to_image_grid(self.current_latent))
                 else:
                     self.assign_current_image(modules.sd_samplers.sample_to_image(self.current_latent))
@@ -177,7 +184,7 @@ class State:
 
     @torch.inference_mode()
     def assign_current_image(self, image: Image.Image):
-        if shared.opts.live_previews_image_format == "jpeg" and image.mode != "RGB":
+        if shared.opts.live_previews_image_format == "jpeg" and not getattr(image, "is_animated", False) and image.mode != "RGB":
             image = image.convert("RGB")
         self.current_image = image
         self.id_live_preview += 1

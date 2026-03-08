@@ -30,7 +30,6 @@ class Anima(ForgeDiffusionEngine):
             text_encoder=clip.cond_stage_model.qwen3_06b,
             qwen_tokenizer=clip.tokenizer.qwen3_06b,
             t5_tokenizer=clip.tokenizer.t5xxl,
-            unet=unet,
         )
 
         self.forge_objects = ForgeObjects(unet=unet, clip=clip, vae=vae, clipvision=None)
@@ -51,12 +50,16 @@ class Anima(ForgeDiffusionEngine):
 
     @torch.inference_mode()
     def encode_first_stage(self, x: torch.Tensor):
-        if x.size(0) > 1:
-            x = x[0].unsqueeze(0)  # enforce batch_size of 1
+        samples: list[torch.Tensor] = []
+        batch: int = x.size(0)
 
-        sample = self.forge_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5)
-        sample = self.forge_objects.vae.first_stage_model.process_in(sample)
-        return sample.to(x)
+        for b in range(batch):
+            y = x[b].unsqueeze(0)
+            sample = self.forge_objects.vae.encode(y.movedim(1, -1) * 0.5 + 0.5)
+            sample = self.forge_objects.vae.first_stage_model.process_in(sample)
+            samples.append(sample)
+
+        return torch.cat(samples).to(x)
 
     @torch.inference_mode()
     def decode_first_stage(self, x):

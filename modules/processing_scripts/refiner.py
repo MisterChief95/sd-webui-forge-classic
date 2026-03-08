@@ -1,4 +1,5 @@
 import gradio as gr
+import torch
 
 from modules import scripts, sd_models
 from modules.infotext_utils import PasteField
@@ -53,3 +54,40 @@ class ScriptRefiner(scripts.ScriptBuiltinUI):
         else:
             p.refiner_checkpoint = refiner_checkpoint
             p.refiner_switch_at = refiner_switch_at
+
+    @torch.inference_mode()
+    def postprocess(self, *args, **kwargs):
+        from modules import sd_samplers_common, shared
+
+        if sd_samplers_common.ORIGINAL_CHECKPOINT is None:
+            return
+
+        sd_model = shared.sd_model
+
+        import huggingface_guess
+
+        from backend.loader import preprocess_state_dict
+        from backend.state_dict import load_state_dict, try_filter_state_dict
+        from backend.utils import load_torch_file
+        from modules_forge.main_entry import logger
+
+        model = sd_model.forge_objects.unet.model.diffusion_model
+
+        sd = load_torch_file(sd_samplers_common.ORIGINAL_CHECKPOINT)
+        sd = preprocess_state_dict(sd)
+
+        guess = huggingface_guess.guess(sd)
+
+        sd = try_filter_state_dict(sd, guess.unet_key_prefix)
+
+        logger.info("Restoring state_dict...")
+        load_state_dict(model, sd)
+
+        if sd_samplers_common.ORIGINAL_CHECKPOINT.lower().endswith(".gguf"):
+
+            from backend.memory_management import bake_gguf_model
+
+            sd_model.forge_objects.unet.model.gguf_baked = False
+            sd_model.forge_objects.unet.model = bake_gguf_model(sd_model.forge_objects.unet.model)
+
+        sd_samplers_common.ORIGINAL_CHECKPOINT = None
