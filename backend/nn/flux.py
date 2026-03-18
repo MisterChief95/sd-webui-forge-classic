@@ -4,6 +4,7 @@
 import math
 from dataclasses import dataclass
 
+import comfy_kitchen as ck
 import torch
 from einops import rearrange, repeat
 from torch import nn
@@ -37,18 +38,7 @@ def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
     return out.to(dtype=torch.float32, device=pos.device)
 
 
-try:
-    import comfy_kitchen as ck
-except ImportError:
-
-    def apply_rope1(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-        x_ = x.to(dtype=freqs_cis.dtype).reshape(*x.shape[:-1], -1, 1, 2)
-        x_out = freqs_cis[..., 0] * x_[..., 0]
-        x_out.addcmul_(freqs_cis[..., 1], x_[..., 1])
-        return x_out.reshape(*x.shape).type_as(x)
-
-else:
-    apply_rope1 = ck.apply_rope1
+apply_rope1 = ck.apply_rope1
 
 
 def apply_rope(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -602,7 +592,7 @@ class IntegratedFluxTransformer2DModel(nn.Module):
         img, img_ids = self.process_img(x)
         img_tokens = img.shape[1]
 
-        ref_latents: list[torch.Tensor] = dynamic_args.get("ref_latents", None)
+        ref_latents: list[torch.Tensor] = ref_latents or dynamic_args.ref_latents
 
         if ref_latents is not None:
             h = 0
