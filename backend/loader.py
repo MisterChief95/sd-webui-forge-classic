@@ -14,6 +14,7 @@ from backend.diffusion_engine.chroma import Chroma
 from backend.diffusion_engine.flux import Flux
 from backend.diffusion_engine.flux2 import Flux2
 from backend.diffusion_engine.lumina import Lumina2
+from backend.diffusion_engine.mugen import Mugen
 from backend.diffusion_engine.qwen import QwenImage
 from backend.diffusion_engine.sd15 import StableDiffusion
 from backend.diffusion_engine.sdxl import StableDiffusionXL, StableDiffusionXLRefiner
@@ -33,8 +34,9 @@ from backend.utils import (
     load_torch_file,
     read_arbitrary_config,
 )
+from modules_forge.packages.comfy.utils import convert_diffusers_mmdit
 
-possible_models = [StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Chroma, Flux, Flux2, Wan, QwenImage, Lumina2, ZImage, Anima]
+possible_models = [StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, Lumina2, ZImage, Anima]
 
 logger = logging.getLogger("loader")
 setup_logger(logger)
@@ -660,13 +662,36 @@ def process_anima(dit: dict[str, torch.Tensor], enc: dict[str, torch.Tensor]):
             enc[k] = dit.pop(k)
 
 
-def split_state_dict(sd, additional_state_dicts: list = None):
+def _load_unet(path: os.PathLike):
     import huggingface_guess
 
-    sd, metadata = load_torch_file(sd, return_metadata=True)
+    sd, metadata = load_torch_file(path, return_metadata=True)
     sd, metadata = convert_quantization(sd, metadata)
     sd = preprocess_state_dict(sd)
     guess = huggingface_guess.guess(sd)
+
+    return sd, metadata, guess
+
+
+def _load_diffuser(path: os.PathLike):
+    import huggingface_guess
+
+    sd, metadata = load_torch_file(path, return_metadata=True)
+    sd, metadata = convert_quantization(sd, metadata)
+    sd = convert_diffusers_mmdit(sd, "")
+    sd = preprocess_state_dict(sd)
+    guess = huggingface_guess.guess(sd)
+
+    return sd, metadata, guess
+
+
+def split_state_dict(path: os.PathLike, additional_state_dicts: list[os.PathLike] = None):
+    try:
+        sd, metadata, guess = _load_unet(path)
+    except Exception:
+        sd, metadata, guess = _load_diffuser(path)
+    finally:
+        memory_management.soft_empty_cache()
 
     if getattr(guess, "nunchaku", False) and ("Z-Image" in guess.huggingface_repo or "Qwen" in guess.huggingface_repo):
         import json
@@ -718,11 +743,8 @@ def split_state_dict(sd, additional_state_dicts: list = None):
 def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = None):
     try:
         state_dicts, estimated_config = split_state_dict(sd, additional_state_dicts=additional_state_dicts)
-    except Exception as e:
-        from modules.errors import display
-
-        display(e, "forge_loader")
-        raise ValueError("Failed to recognize model type!")
+    except Exception:
+        raise ValueError("Failed to recognize model type!") from None
 
     repo_name = estimated_config.huggingface_repo
     if "xl" in repo_name and "rectified" in str(sd).lower():
