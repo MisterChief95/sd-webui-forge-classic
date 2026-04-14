@@ -1390,11 +1390,21 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
             def get_hr_prompt(p, index, prompt_text, **kwargs):
                 hr_prompt = p.all_hr_prompts[index]
-                return hr_prompt if hr_prompt != prompt_text else None
+                if hr_prompt != prompt_text: 
+                    if "[PROMPT]" in hr_prompt:
+                        hr_prompt = hr_prompt.replace("[PROMPT]", prompt_text)
+                    return hr_prompt
+                else:
+                    return None
 
             def get_hr_negative_prompt(p, index, negative_prompt, **kwargs):
                 hr_negative_prompt = p.all_hr_negative_prompts[index]
-                return hr_negative_prompt if hr_negative_prompt != negative_prompt else None
+                if hr_negative_prompt != negative_prompt:
+                    if "[PROMPT]" in hr_negative_prompt:
+                        hr_negative_prompt = hr_negative_prompt.replace("[PROMPT]", negative_prompt)
+                    return hr_negative_prompt
+                else:
+                    return None
 
             self.extra_generation_params["Hires prompt"] = get_hr_prompt
             self.extra_generation_params["Hires negative prompt"] = get_hr_negative_prompt
