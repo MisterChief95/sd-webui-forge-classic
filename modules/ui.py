@@ -57,6 +57,11 @@ def gr_show(visible=True):
     return {"visible": visible, "__type__": "update"}
 
 
+def no_config(*comps: gr.components.Component):
+    for comp in comps:
+        comp.do_not_save_to_config = True
+
+
 # Using constants for these since the variation selector isn't visible.
 # Important that they exactly match script.js for tooltip to work.
 random_symbol = "\U0001f3b2\ufe0f"  # 🎲️
@@ -145,31 +150,6 @@ def update_negative_prompt_token_counter(*args):
     return update_token_counter(*args, is_positive=False)
 
 
-def apply_setting(key, value):
-    if value is None:
-        return gr.skip()
-
-    if shared.cmd_opts.freeze_settings:
-        return gr.skip()
-
-    # dont allow model to be swapped when model hash exists in prompt
-    if key in ("sd_model_checkpoint", "forge_additional_modules"):
-        return gr.skip()
-
-    comp_args = opts.data_labels[key].component_args
-    if comp_args and isinstance(comp_args, dict) and comp_args.get("visible") is False:
-        return
-
-    valtype = type(opts.data_labels[key].default)
-    oldval = opts.data.get(key, None)
-    opts.data[key] = valtype(value) if valtype != type(None) else value
-    if oldval != value and opts.data_labels[key].onchange is not None:
-        opts.data_labels[key].onchange()
-
-    opts.save(shared.config_filename)
-    return getattr(opts, key)
-
-
 def create_output_panel(tabname, outdir, toprow=None):
     return ui_common.create_output_panel(tabname, outdir, toprow)
 
@@ -210,7 +190,7 @@ def create_ui():
     minimum_cfg: float = 0.0 if opts.disable_cfg1_optimization else 1.0
 
     with gr.Blocks(analytics_enabled=False, head=canvas_head) as txt2img_interface:
-        toprow = ui_toprow.Toprow(is_img2img=False, is_compact=shared.opts.compact_prompt_box)
+        toprow = ui_toprow.Toprow(is_img2img=False)
 
         dummy_component = gr.Textbox(visible=False)
         dummy_component_number = gr.Number(visible=False)
@@ -501,6 +481,9 @@ def create_ui():
 
             steps = scripts.scripts_txt2img.script("Sampler").steps
 
+            no_config(width, height, cfg_scale, distilled_cfg_scale, batch_size)
+            no_config(hr_second_pass_steps, hr_cfg, hr_distilled_cfg)
+
             toprow.ui_styles.dropdown.change(fn=wrap_queued_call(update_token_counter), inputs=[toprow.prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.token_counter])
             toprow.ui_styles.dropdown.change(fn=wrap_queued_call(update_negative_prompt_token_counter), inputs=[toprow.negative_prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.negative_token_counter])
             toprow.token_button.click(fn=wrap_queued_call(update_token_counter), inputs=[toprow.prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.token_counter])
@@ -518,7 +501,7 @@ def create_ui():
     scripts.scripts_img2img.initialize_scripts(is_img2img=True)
 
     with gr.Blocks(analytics_enabled=False, head=canvas_head) as img2img_interface:
-        toprow = ui_toprow.Toprow(is_img2img=True, is_compact=shared.opts.compact_prompt_box)
+        toprow = ui_toprow.Toprow(is_img2img=True)
 
         extra_tabs = gr.Tabs(elem_id="img2img_extra_tabs", elem_classes=["extra-networks"])
         extra_tabs.__enter__()
@@ -650,15 +633,15 @@ def create_ui():
                                     scale_by.change(**on_change_args)
                                     button_update_resize_to.click(**on_change_args)
 
-                                    def updateWH(img, w, h):
-                                        if img and shared.opts.img2img_autosize == True:
-                                            return img.size[0], img.size[1]
+                                    def updateWH(img):
+                                        if img and shared.opts.img2img_autosize is True:
+                                            return _round(img.size[0]), _round(img.size[1])
                                         else:
-                                            return w, h
+                                            return gr.skip(), gr.skip()
 
                                     img_sources = [init_img.background, sketch.background, init_img_with_mask.background, inpaint_color_sketch.background, init_img_inpaint]
                                     for i in img_sources:
-                                        i.change(fn=updateWH, inputs=[i, width, height], outputs=[width, height], show_progress="hidden")
+                                        i.change(fn=updateWH, inputs=[i], outputs=[width, height], show_progress="hidden")
                                         i.change(**on_change_args)
 
                             tab_scale_to.select(fn=lambda: 0, outputs=[selected_scale_tab])
@@ -819,14 +802,24 @@ def create_ui():
                 show_progress=False,
             )
 
-            steps = scripts.scripts_img2img.script("Sampler").steps
-
-            toprow.ui_styles.dropdown.change(fn=wrap_queued_call(update_token_counter), inputs=[toprow.prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.token_counter])
-            toprow.ui_styles.dropdown.change(fn=wrap_queued_call(update_negative_prompt_token_counter), inputs=[toprow.negative_prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.negative_token_counter])
-            toprow.token_button.click(fn=update_token_counter, inputs=[toprow.prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.token_counter])
-            toprow.negative_token_button.click(fn=wrap_queued_call(update_negative_prompt_token_counter), inputs=[toprow.negative_prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.negative_token_counter])
-
-            img2img_paste_fields = [(toprow.prompt, "Prompt"), (toprow.negative_prompt, "Negative prompt"), (cfg_scale, "CFG scale"), (distilled_cfg_scale, "Distilled CFG Scale"), (image_cfg_scale, "Image CFG scale"), (width, "Size-1"), (height, "Size-2"), (batch_size, "Batch size"), (toprow.ui_styles.dropdown, lambda d: d["Styles array"] if isinstance(d.get("Styles array"), list) else gr.skip()), (denoising_strength, "Denoising strength"), (mask_blur, "Mask blur"), (inpainting_mask_invert, "Mask mode"), (inpainting_fill, "Masked content"), (inpaint_full_res, "Inpaint area"), (inpaint_full_res_padding, "Masked area padding"), *scripts.scripts_img2img.infotext_fields]
+            img2img_paste_fields = [
+                (toprow.prompt, "Prompt"),
+                (toprow.negative_prompt, "Negative prompt"),
+                (cfg_scale, "CFG scale"),
+                (distilled_cfg_scale, "Distilled CFG Scale"),
+                (image_cfg_scale, "Image CFG scale"),
+                (width, "Size-1"),
+                (height, "Size-2"),
+                (batch_size, "Batch size"),
+                (toprow.ui_styles.dropdown, lambda d: d["Styles array"] if isinstance(d.get("Styles array"), list) else gr.skip()),
+                (denoising_strength, "Denoising strength"),
+                (mask_blur, "Mask blur"),
+                (inpainting_mask_invert, "Mask mode"),
+                (inpainting_fill, "Masked content"),
+                (inpaint_full_res, "Inpaint area"),
+                (inpaint_full_res_padding, "Masked area padding"),
+                *scripts.scripts_img2img.infotext_fields,
+            ]
             parameters_copypaste.add_paste_fields("img2img", init_img.background, img2img_paste_fields, override_settings)
             parameters_copypaste.add_paste_fields("inpaint", init_img_with_mask.background, img2img_paste_fields, override_settings)
             parameters_copypaste.register_paste_params_button(
@@ -837,6 +830,15 @@ def create_ui():
                     source_image_component=None,
                 )
             )
+
+            steps = scripts.scripts_img2img.script("Sampler").steps
+
+            no_config(width, height, cfg_scale, distilled_cfg_scale, batch_size)
+
+            toprow.ui_styles.dropdown.change(fn=wrap_queued_call(update_token_counter), inputs=[toprow.prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.token_counter])
+            toprow.ui_styles.dropdown.change(fn=wrap_queued_call(update_negative_prompt_token_counter), inputs=[toprow.negative_prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.negative_token_counter])
+            toprow.token_button.click(fn=update_token_counter, inputs=[toprow.prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.token_counter])
+            toprow.negative_token_button.click(fn=wrap_queued_call(update_negative_prompt_token_counter), inputs=[toprow.negative_prompt, steps, toprow.ui_styles.dropdown], outputs=[toprow.negative_token_counter])
 
         extra_networks_ui_img2img = ui_extra_networks.create_ui(img2img_interface, [img2img_generation_tab], "img2img")
         ui_extra_networks.setup_ui(extra_networks_ui_img2img, output_panel.gallery)

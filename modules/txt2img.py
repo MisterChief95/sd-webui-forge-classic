@@ -82,17 +82,20 @@ def txt2img_upscale_function(id_task: str, request: gr.Request, gallery, gallery
         return gallery, generation_info, "Unable to upscale grid or control images.", ""
 
     p = txt2img_create_processing(id_task, request, *args, force_enable_hr=True)
-    p.batch_size = 1
-    p.n_iter = 1
+    if opts.txt2img_upscale_single_batch:
+        p.batch_size = 1
+        p.n_iter = 1
+
     # txt2img_upscale attribute that signifies this is called by txt2img_upscale
     p.txt2img_upscale = True
 
     image_info = gallery[gallery_index]
     p.firstpass_image = infotext_utils.image_from_url_text(image_info)
 
-    parameters = parse_generation_parameters(geninfo.get("infotexts")[gallery_index], [])
-    p.seed = parameters.get("Seed", -1)
-    p.subseed = parameters.get("Variation seed", -1)
+    if opts.txt2img_upscale_same_seed:
+        parameters = parse_generation_parameters(geninfo.get("infotexts")[gallery_index], [])
+        p.seed = parameters.get("Seed", -1)
+        p.subseed = parameters.get("Variation seed", -1)
 
     # update processing width/height based on actual dimensions of source image
     p.width = gallery[gallery_index][0].size[0]
@@ -111,22 +114,23 @@ def txt2img_upscale_function(id_task: str, request: gr.Request, gallery, gallery
 
     insert = getattr(shared.opts, "hires_button_gallery_insert", False)
     new_gallery = []
+    new_infotexts = []
+
     for i, image in enumerate(gallery):
         if insert or i != gallery_index:
             image[0].already_saved_as = image[0].filename.rsplit("?", 1)[0]
             new_gallery.append(image)
+            if i >= len(geninfo["infotexts"]):  # e.g. ControlNet Detected Map
+                new_infotexts.append(None)
+            else:
+                new_infotexts.append(geninfo["infotexts"][i])
         if i == gallery_index:
             new_gallery.extend(processed.images)
+            new_infotexts.extend(processed.infotexts)
 
-    if insert:
-        new_index = gallery_index + 1
-        geninfo["infotexts"].insert(new_index, processed.info)
-        if not getattr(shared.opts, "hires_insert_index", True):
-            gallery_index -= 1
-    else:
-        geninfo["infotexts"][gallery_index] = processed.info
+    geninfo["infotexts"] = new_infotexts
 
-    return gr.update(value=new_gallery, selected_index=gallery_index), json.dumps(geninfo), plaintext_to_html(processed.info), plaintext_to_html(processed.comments, classname="comments")
+    return gr.update(value=new_gallery, selected_index=gallery_index), json.dumps(geninfo), plaintext_to_html(processed.infotexts[0]), plaintext_to_html(processed.comments, classname="comments")
 
 
 def txt2img_function(id_task: str, request: gr.Request, *args):

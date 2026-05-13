@@ -5,12 +5,14 @@ from functools import partial
 from typing import Callable
 
 import torch
+import yaml
 from transformers.modeling_utils import no_init_weights
 
 import backend.args
 from backend import memory_management, utils
 from backend.diffusion_engine.anima import Anima
 from backend.diffusion_engine.chroma import Chroma
+from backend.diffusion_engine.ernie import ErnieImage
 from backend.diffusion_engine.flux import Flux
 from backend.diffusion_engine.flux2 import Flux2
 from backend.diffusion_engine.lumina import Lumina2
@@ -36,7 +38,7 @@ from backend.utils import (
 )
 from modules_forge.packages.comfy.utils import convert_diffusers_mmdit
 
-possible_models = [StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, Lumina2, ZImage, Anima]
+possible_models = [StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, Lumina2, ZImage, Anima, ErnieImage]
 
 logger = logging.getLogger("loader")
 setup_logger(logger)
@@ -66,7 +68,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
             config = IntegratedAutoencoderKL.load_config(config_path)
 
             with no_init_weights():
-                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype()):
+                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), bnb_dtype="vae"):
                     model = IntegratedAutoencoderKL.from_config(config)
 
             load_state_dict(model, state_dict, ignore_start="loss.")
@@ -77,20 +79,30 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             config = AutoencoderKLFlux2.load_config(config_path)
 
+            if int(state_dict["decoder.conv_in.weight"].shape[0]) == 384:  # Small Decoder
+                config["dch"] = 96
+
             with no_init_weights():
-                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype()):
+                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), bnb_dtype="vae"):
                     model = AutoencoderKLFlux2.from_config(config)
 
             load_state_dict(model, state_dict, ignore_start="loss.")
             return model
         if cls_name in ["AutoencoderKLWan", "AutoencoderKLQwenImage"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have VAE state dict!"
-            from backend.nn.wan_vae import WanVAE
 
-            config = WanVAE.load_config(config_path)
+            if "post_quant_conv.weight" in state_dict:  # 2D
+                from backend.nn.wan_vae_2d import Qwen2DVAE as WanVAE
+
+                config = {}
+
+            else:
+                from backend.nn.wan_vae import WanVAE
+
+                config = WanVAE.load_config(config_path)
 
             with no_init_weights():
-                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype()):
+                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), bnb_dtype="vae"):
                     model = WanVAE.from_config(config)
 
             load_state_dict(model, state_dict)
@@ -179,6 +191,40 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             load_state_dict(model, state_dict, log_name=cls_name, ignore_start="lm_head.")
             return model
+        if cls_name == "Mistral3Model":
+            assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have Mistral3 state dict!"
+
+            from backend.nn.llm.llama import Ministral3_3B
+
+            config = read_arbitrary_config(config_path)
+
+            storage_dtype = memory_management.text_encoder_dtype()
+            state_dict_dtype = utils.weight_dtype(state_dict)
+            quant_config = detect_quantization(state_dict)
+
+            if quant_config is not None:
+                storage_dtype = state_dict_dtype
+                logger.info("Using MixedPrecision for Mistral3")
+            elif state_dict_dtype in [torch.float8_e4m3fn, torch.float8_e5m2, "nf4", "fp4", "gguf"]:
+                storage_dtype = state_dict_dtype
+                _log = f"{storage_dtype}" + (" (pre-quant)" if state_dict_dtype in ["nf4", "fp4", "gguf"] else "")
+                logger.info(f"Using Detected Mistral3 Data Type: {_log}")
+                if state_dict_dtype == "gguf":
+                    beautiful_print_gguf_state_dict_statics(state_dict)
+            else:
+                logger.info(f"Using Default Mistral3 Data Type: {storage_dtype}")
+
+            if storage_dtype in ["nf4", "fp4", "gguf"]:
+                with no_init_weights():
+                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, bnb_dtype=storage_dtype):
+                        model = Ministral3_3B(config)
+            else:
+                with no_init_weights():
+                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, bnb_dtype=quant_config):
+                        model = Ministral3_3B(config)
+
+            load_state_dict(model, state_dict, log_name=cls_name)
+            return model
         if cls_name in ["Qwen3Model", "Qwen3ForCausalLM"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have Qwen3 state dict!"
 
@@ -262,7 +308,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             load_state_dict(model, state_dict, log_name=cls_name, ignore_errors=["transformer.encoder.embed_tokens.weight", "logit_scale"])
             return model
-        if cls_name in ["UNet2DConditionModel", "FluxTransformer2DModel", "Flux2Transformer2DModel", "ChromaTransformer2DModel", "WanTransformer3DModel", "QwenImageTransformer2DModel", "Lumina2Transformer2DModel", "ZImageTransformer2DModel", "CosmosTransformer3DModel"]:
+        if cls_name in ["UNet2DConditionModel", "FluxTransformer2DModel", "Flux2Transformer2DModel", "ChromaTransformer2DModel", "WanTransformer3DModel", "QwenImageTransformer2DModel", "Lumina2Transformer2DModel", "ZImageTransformer2DModel", "CosmosTransformer3DModel", "ErnieImageTransformer2DModel"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have model state dict!"
             pre_func: Callable[[torch.nn.Module], torch.nn.Module] = lambda mdl: mdl
             model_loader = None
@@ -316,6 +362,10 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 from backend.nn.anima import Anima
 
                 model_loader = lambda c: Anima(**c)
+            elif cls_name == "ErnieImageTransformer2DModel":
+                from backend.nn.ernie import ErnieImageModel
+
+                model_loader = lambda c: ErnieImageModel(**c)
 
             load_device = memory_management.get_torch_device()
             offload_device = memory_management.unet_offload_device()
@@ -329,12 +379,8 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             override_dtype = backend.args.dynamic_args.forge_unet_storage_dtype
             if override_dtype is torch.int8:
-                if state_dict_dtype is torch.bfloat16:
-                    override_dtype = torch.bfloat16
-                    try_int8 = True
-                else:
-                    override_dtype = None
-                    logger.warning("int8 only supports bfloat16 models...")
+                override_dtype = torch.bfloat16
+                try_int8 = True
 
             if guess.nunchaku:
                 storage_dtype = torch.bfloat16
@@ -382,6 +428,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                     extra_dtype = str(guess.__class__.__name__)
                 elif quant_config is not None:
                     extra_dtype = quant_config
+                    to_args.clear()
                 else:
                     extra_dtype = None
 
@@ -441,6 +488,7 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
 
     ##  identify model type
     flux_test_key = "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.scale"
+    flux_test_key_weight = "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.weight"
     svdq_test_key = "model.diffusion_model.single_transformer_blocks.0.mlp_fc1.qweight"
     legacy_test_key = "model.diffusion_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight"
 
@@ -453,7 +501,7 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
                 model_type = "xlrf"  # sdxl refiner model
             case 2048:
                 model_type = "sdxl"
-    elif flux_test_key in sd or svdq_test_key in sd:
+    elif flux_test_key in sd or flux_test_key_weight in sd or svdq_test_key in sd:
         model_type = "flux"
 
     ##  prefixes used by various model types for CLIP-L
@@ -632,12 +680,20 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
         for k, v in asd.items():
             sd[f"{text_encoder_key_prefix}qwen25_7b.{k}"] = v
 
-    elif "model.layers.0.post_attention_layernorm.weight" in asd:
-        assert "model.layers.0.self_attn.q_norm.weight" in asd
+    elif "model.layers.0.post_attention_layernorm.weight" in asd and "model.layers.0.self_attn.q_norm.weight" in asd:
         weight: torch.Tensor = asd["model.layers.0.post_attention_layernorm.weight"]
         size: str = "06b" if weight.shape[0] == 1024 else ("4b" if weight.shape[0] == 2560 else "8b")
         for k, v in asd.items():
             sd[f"{text_encoder_key_prefix}qwen3_{size}.transformer.{k}"] = v
+
+    elif "model.layers.0.post_attention_layernorm.weight" in asd:
+        weight: torch.Tensor = asd["model.layers.0.post_attention_layernorm.weight"]
+        assert weight.shape[0] == 3072
+
+        for k, v in asd.items():
+            if not k.startswith("model"):
+                continue
+            sd[f"{text_encoder_key_prefix}ministral3_3b.transformer.{k}"] = v
 
     if "visual.blocks.0.attn.proj.weight" in asd:
         for k, v in asd.items():
@@ -743,18 +799,19 @@ def split_state_dict(path: os.PathLike, additional_state_dicts: list[os.PathLike
 def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = None):
     try:
         state_dicts, estimated_config = split_state_dict(sd, additional_state_dicts=additional_state_dicts)
-    except Exception:
-        raise ValueError("Failed to recognize model type!") from None
+    except AttributeError:
+        raise ValueError("Failed to recognize model...") from None
 
     repo_name = estimated_config.huggingface_repo
-    if "xl" in repo_name and "rectified" in str(sd).lower():
-        estimated_config.sampling_settings["RF"] = True
 
     backend.args.dynamic_args.kontext = "kontext" in str(sd).lower()
     backend.args.dynamic_args.edit = "qwen" in str(sd).lower() and "edit" in str(sd).lower()
     backend.args.dynamic_args.nunchaku = getattr(estimated_config, "nunchaku", False)
     backend.args.dynamic_args.klein = "klein" in repo_name
     backend.args.dynamic_args.wan = "Wan" in repo_name
+
+    if "xl" in repo_name and "rectified" in str(sd).lower():
+        estimated_config.sampling_settings["RF"] = True
 
     if getattr(estimated_config, "nunchaku", False):
         estimated_config.unet_config["filename"] = str(sd)
@@ -777,47 +834,36 @@ def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = No
 
     del state_dicts
 
-    yaml_config = None
-    yaml_config_prediction_type = None
+    config_filename = os.path.splitext(sd)[0] + ".yaml"
+    yaml_pred_type = None
 
-    try:
-        from pathlib import Path
+    if os.path.isfile(config_filename):
+        with open(config_filename, "r") as stream:
+            yaml_config: dict[str, dict] = yaml.safe_load(stream)
 
-        import yaml
+        _params: dict[str, dict] = yaml_config.get("model", {}).get("params", {})
+        _pred_type: str = _params.get("parameterization", "") or _params.get("denoiser_config", {}).get("params", {}).get("scaling_config", {}).get("target", "")
 
-        config_filename = os.path.splitext(sd)[0] + ".yaml"
-        if Path(config_filename).is_file():
-            with open(config_filename, "r") as stream:
-                yaml_config = yaml.safe_load(stream)
-    except ImportError:
-        pass
+        if _pred_type == "v" or _pred_type.endswith(".VScaling"):
+            yaml_pred_type = "v_prediction"
+        else:
+            yaml_pred_type = None
 
-    prediction_types = {
+    PRED_TYPES = {
         "EPS": "epsilon",
         "V_PREDICTION": "v_prediction",
         "FLUX": "const",
         "FLOW": "const",
     }
 
-    has_prediction_type = "scheduler" in huggingface_components and hasattr(huggingface_components["scheduler"], "config") and "prediction_type" in huggingface_components["scheduler"].config
-
-    if yaml_config is not None:
-        yaml_config_prediction_type: str = yaml_config.get("model", {}).get("params", {}).get("parameterization", "") or yaml_config.get("model", {}).get("params", {}).get("denoiser_config", {}).get("params", {}).get("scaling_config", {}).get("target", "")
-        if yaml_config_prediction_type == "v" or yaml_config_prediction_type.endswith(".VScaling"):
-            yaml_config_prediction_type = "v_prediction"
-        else:
-            # Use estimated prediction config if no suitable prediction type found
-            yaml_config_prediction_type = ""
-
-    if has_prediction_type:
-        if yaml_config_prediction_type:
-            huggingface_components["scheduler"].config.prediction_type = yaml_config_prediction_type
-        else:
-            huggingface_components["scheduler"].config.prediction_type = prediction_types.get(estimated_config.model_type.name, huggingface_components["scheduler"].config.prediction_type)
+    if "prediction_type" in getattr(huggingface_components.get("scheduler", None), "config", {}):
+        if yaml_pred_type:
+            huggingface_components["scheduler"].config.prediction_type = yaml_pred_type
+        elif estimated_config.model_type.name in PRED_TYPES:
+            huggingface_components["scheduler"].config.prediction_type = PRED_TYPES[estimated_config.model_type.name]
 
     for M in possible_models:
         if any(type(estimated_config) is x for x in M.matched_guesses):
             return M(estimated_config=estimated_config, huggingface_components=huggingface_components)
 
-    logger.error("Failed to recognize model... (check README for supported models)")
-    return None
+    raise ValueError("Failed to recognize model...") from None

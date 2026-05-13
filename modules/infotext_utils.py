@@ -5,16 +5,13 @@ import io
 import json
 import os
 import re
-import sys
 
 import gradio as gr
 from PIL import Image
 
-from modules import errors, images, infotext_versions, processing, prompt_parser, script_callbacks, shared, ui_tempdir
+from modules import errors, images, processing, prompt_parser, script_callbacks, shared, ui_tempdir
 from modules.paths import data_path
 from modules_forge import main_entry
-
-sys.modules["modules.generation_parameters_copypaste"] = sys.modules[__name__]  # alias for old name
 
 re_param_code = r'\s*(\w[\w \-/]+):\s*("(?:\\.|[^\\"])+"|[^,]*)(?:,|$)'
 re_param = re.compile(re_param_code)
@@ -317,7 +314,7 @@ def parse_generation_parameters(x: str, skip_fields: list[str] | None = None):
         found_styles, prompt_no_styles, negative_prompt_no_styles = shared.prompt_styles.extract_styles_from_prompt(prompt, negative_prompt)
 
         same_hr_styles = True
-        if ("Hires prompt" in res or "Hires negative prompt" in res) and (infotext_ver > infotext_versions.v180_hr_styles if (infotext_ver := infotext_versions.parse_version(res.get("Version"))) else True):
+        if "Hires prompt" in res or "Hires negative prompt" in res:
             hr_prompt, hr_negative_prompt = res.get("Hires prompt", prompt), res.get("Hires negative prompt", negative_prompt)
             hr_found_styles, hr_prompt_no_styles, hr_negative_prompt_no_styles = shared.prompt_styles.extract_styles_from_prompt(hr_prompt, hr_negative_prompt)
             if same_hr_styles := found_styles == hr_found_styles:
@@ -401,7 +398,8 @@ def parse_generation_parameters(x: str, skip_fields: list[str] | None = None):
     if "Shift" in res:
         res["Distilled CFG Scale"] = res.pop("Shift")
 
-    infotext_versions.backcompat(res)
+    if "Hires Shift" in res:
+        res["Hires Distilled CFG Scale"] = res.pop("Hires Shift")
 
     for key in skip_fields:
         res.pop(key, None)

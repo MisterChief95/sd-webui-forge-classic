@@ -1,7 +1,3 @@
-import random
-import string
-import time
-
 import cv2
 import numpy as np
 import torch
@@ -31,6 +27,10 @@ def apply_circular_forge(model, tiling_enabled=False):
     for layer in [layer for layer in unet.modules() if isinstance(layer, torch.nn.Conv2d)]:
         layer.padding_mode = "circular" if tiling_enabled else "zeros"
 
+    vae: torch.nn.Module = model.forge_objects.vae.first_stage_model
+    for layer in [layer for layer in vae.modules() if isinstance(layer, torch.nn.Conv2d)]:
+        layer.padding_mode = "circular" if tiling_enabled else "zeros"
+
     print(f"Tiling: {tiling_enabled}")
 
 
@@ -53,22 +53,13 @@ def HWC3(x):
         return y
 
 
-def generate_random_filename(extension=".txt"):
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    random_string = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
-    filename = f"{timestamp}-{random_string}{extension}"
-    return filename
-
-
-@torch.no_grad()
 @torch.inference_mode()
-def pytorch_to_numpy(x):
+def pytorch_to_numpy(x: torch.Tensor) -> np.ndarray:
     return [np.clip(255.0 * y.cpu().numpy(), 0, 255).astype(np.uint8) for y in x]
 
 
-@torch.no_grad()
 @torch.inference_mode()
-def numpy_to_pytorch(x):
+def numpy_to_pytorch(x: np.ndarray) -> torch.Tensor:
     y = x.astype(np.float32) / 255.0
     y = y[None]
     y = np.ascontiguousarray(y.copy())

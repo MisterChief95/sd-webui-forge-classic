@@ -18,7 +18,7 @@ from modules import (
     shared_items,
     ui_common,
 )
-from modules_forge.presets import PresetArch, use_distill, use_shift
+from modules_forge.presets import PresetArch, is_video, use_distill, use_shift
 
 logger = logging.getLogger("ui_models")
 setup_logger(logger)
@@ -279,13 +279,19 @@ def on_preset_change(preset: str):
     shared.opts.save(shared.config_filename)
 
     if use_shift(preset):
-        d_args = {"visible": getattr(shared.opts, "xl_show_shift", False) if preset == "xl" else True, "label": "Shift"}
+        d_args = {"visible": getattr(shared.opts, f"{preset}_show_shift", True), "label": "Shift"}
     elif use_distill(preset):
         d_args = {"visible": True, "label": "Distilled CFG Scale"}
     else:
         d_args = {"visible": False}
 
-    batch_args = {"minimum": 1, "maximum": 241, "step": 16, "label": "Frames", "value": 1} if preset == "wan" else {"minimum": 1, "maximum": 8, "step": 1, "label": "Batch Size", "value": 1}
+    if (fps := is_video(preset)) > 1:
+        batch_args_t2i = {"minimum": 1, "maximum": fps * 15 + 1, "step": fps, "label": "Frames", "value": getattr(shared.opts, f"{preset}_t2i_batch_size", 1)}
+    else:
+        batch_args_t2i = {"minimum": 1, "maximum": 8, "step": 1, "label": "Batch Size", "value": getattr(shared.opts, f"{preset}_t2i_batch_size", 1)}
+
+    batch_args_i2i = batch_args_t2i.copy()
+    batch_args_i2i["value"] = getattr(shared.opts, f"{preset}_i2i_batch_size", 1)
 
     return [
         # ui_checkpoint, ui_vae, ui_forge_unet_dtype
@@ -315,6 +321,6 @@ def on_preset_change(preset: str):
         gr.update(value=getattr(shared.opts, f"{preset}_t2i_hr_dcfg", 3.0), **d_args),
         gr.update(value=getattr(shared.opts, f"{preset}_i2i_dcfg", 3.0), **d_args),
         # ui_txt2img_batch_size, ui_img2img_batch_size
-        gr.update(**batch_args),
-        gr.update(**batch_args),
+        gr.update(**batch_args_t2i),
+        gr.update(**batch_args_i2i),
     ]

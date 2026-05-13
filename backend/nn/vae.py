@@ -1,12 +1,14 @@
 import math
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from einops import rearrange
-from torch import nn
 
 from backend import memory_management
 from backend.attention import attention_function_vae
+from backend.nn._vae import ProcessLatent
 
 
 def nonlinearity(x):
@@ -46,14 +48,14 @@ class Upsample(nn.Module):
     @torch.inference_mode()
     def forward(self, x):
         try:
-            x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+            x = F.interpolate(x, scale_factor=2.0, mode="nearest")
         except Exception as e:
             b, c, h, w = x.shape
             out = torch.empty((b, c, h * 2, w * 2), dtype=x.dtype, layout=x.layout, device=x.device)
             split = 8
             l = out.shape[1] // split
             for i in range(0, out.shape[1], l):
-                out[:, i : i + l] = torch.nn.functional.interpolate(x[:, i : i + l].to(torch.float32), scale_factor=2.0, mode="nearest").to(x.dtype)
+                out[:, i : i + l] = F.interpolate(x[:, i : i + l].to(torch.float32), scale_factor=2.0, mode="nearest").to(x.dtype)
             del x
             x = out
 
@@ -73,10 +75,10 @@ class Downsample(nn.Module):
     def forward(self, x):
         if self.with_conv:
             pad = (0, 1, 0, 1)
-            x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
+            x = F.pad(x, pad, mode="constant", value=0)
             x = self.conv(x)
         else:
-            x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
+            x = F.avg_pool2d(x, kernel_size=2, stride=2)
         return x
 
 
@@ -88,13 +90,13 @@ class ResnetBlock(nn.Module):
         self.out_channels = out_channels
         self.use_conv_shortcut = conv_shortcut
 
-        self.swish = torch.nn.SiLU(inplace=True)
+        self.swish = nn.SiLU(inplace=True)
         self.norm1 = Normalize(in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
         if temb_channels > 0:
             self.temb_proj = nn.Linear(temb_channels, out_channels)
         self.norm2 = Normalize(out_channels)
-        self.dropout = torch.nn.Dropout(dropout, inplace=True)
+        self.dropout = nn.Dropout(dropout, inplace=True)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
@@ -282,12 +284,14 @@ class Decoder(nn.Module):
         return h
 
 
-class IntegratedAutoencoderKL(nn.Module, ConfigMixin):
+class IntegratedAutoencoderKL(nn.Module, ProcessLatent, ConfigMixin):
     config_name = "config.json"
 
     @register_to_config
-    def __init__(self, in_channels=3, out_channels=3, down_block_types=("DownEncoderBlock2D",), up_block_types=("UpDecoderBlock2D",), block_out_channels=(64,), layers_per_block=1, act_fn="silu", latent_channels=4, norm_num_groups=32, sample_size=32, scaling_factor=0.18215, shift_factor=0.0, latents_mean=None, latents_std=None, force_upcast=True, use_quant_conv=True, use_post_quant_conv=True):
+    def __init__(self, in_channels=3, out_channels=3, block_out_channels=(64,), layers_per_block=1, latent_channels=4, use_quant_conv=True, use_post_quant_conv=True, **kwargs):
+        del kwargs
         super().__init__()
+
         ch = block_out_channels[0]
         ch_mult = [x // ch for x in block_out_channels]
         self.encoder = Encoder(double_z=True, z_channels=latent_channels, resolution=256, in_channels=in_channels, out_ch=out_channels, ch=ch, ch_mult=ch_mult, num_res_blocks=layers_per_block, attn_resolutions=[], dropout=0.0)
@@ -295,11 +299,6 @@ class IntegratedAutoencoderKL(nn.Module, ConfigMixin):
         self.quant_conv = nn.Conv2d(2 * latent_channels, 2 * latent_channels, 1) if use_quant_conv else None
         self.post_quant_conv = nn.Conv2d(latent_channels, latent_channels, 1) if use_post_quant_conv else None
         self.embed_dim = latent_channels
-        self.scaling_factor = scaling_factor
-        self.shift_factor = shift_factor
-
-        if not isinstance(self.shift_factor, float):
-            self.shift_factor = 0.0
 
     def encode(self, x):
         z = self.encoder(x)
@@ -317,36 +316,27 @@ class IntegratedAutoencoderKL(nn.Module, ConfigMixin):
         x = self.decoder(z)
         return x
 
-    def process_in(self, latent):
-        return (latent - self.shift_factor) * self.scaling_factor
-
-    def process_out(self, latent):
-        return (latent / self.scaling_factor) + self.shift_factor
-
 
 class AutoencoderKLFlux2(IntegratedAutoencoderKL):
     config_name = "config.json"
 
     @register_to_config
-    def __init__(self, in_channels=3, out_channels=3, down_block_types=("DownEncoderBlock2D",), up_block_types=("UpDecoderBlock2D",), block_out_channels=(64,), layers_per_block=1, act_fn="silu", latent_channels=4, norm_num_groups=32, sample_size=32, scaling_factor=0.18215, shift_factor=0.0, latents_mean=None, latents_std=None, force_upcast=True, use_quant_conv=True, use_post_quant_conv=True):
+    def __init__(self, in_channels=3, out_channels=3, block_out_channels=(64,), layers_per_block=1, latent_channels=4, use_quant_conv=True, use_post_quant_conv=True, *, mugen: bool = False, ech: int = None, dch: int = None, **kwargs):
+        del kwargs
         super().__init__()
+
         ch = block_out_channels[0]
         ch_mult = [x // ch for x in block_out_channels]
-        self.encoder = Encoder(double_z=True, z_channels=latent_channels, resolution=256, in_channels=in_channels, out_ch=out_channels, ch=ch, ch_mult=ch_mult, num_res_blocks=layers_per_block, attn_resolutions=[], dropout=0.0)
-        self.decoder = Decoder(double_z=True, z_channels=latent_channels, resolution=256, in_channels=in_channels, out_ch=out_channels, ch=ch, ch_mult=ch_mult, num_res_blocks=layers_per_block, attn_resolutions=[], dropout=0.0)
+        self.encoder = Encoder(double_z=True, z_channels=latent_channels, resolution=256, in_channels=in_channels, out_ch=out_channels, ch=ech or ch, ch_mult=ch_mult, num_res_blocks=layers_per_block, attn_resolutions=[], dropout=0.0)
+        self.decoder = Decoder(double_z=True, z_channels=latent_channels, resolution=256, in_channels=in_channels, out_ch=out_channels, ch=dch or ch, ch_mult=ch_mult, num_res_blocks=layers_per_block, attn_resolutions=[], dropout=0.0)
         self.quant_conv = nn.Conv2d(2 * latent_channels, 2 * latent_channels, 1) if use_quant_conv else None
         self.post_quant_conv = nn.Conv2d(latent_channels, latent_channels, 1) if use_post_quant_conv else None
         self.embed_dim = latent_channels
-        self.scaling_factor = scaling_factor
-        self.shift_factor = shift_factor
-
-        if not isinstance(self.shift_factor, float):
-            self.shift_factor = 0.0
 
         self.bn_eps = 1e-4
         self.bn_momentum = 0.1
         self.ps = [2, 2]
-        self.bn = torch.nn.BatchNorm2d(
+        self.bn = nn.BatchNorm2d(
             math.prod(self.ps) * latent_channels,
             eps=self.bn_eps,
             momentum=self.bn_momentum,
@@ -355,7 +345,7 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
         )
         self.bn.eval()
 
-        self.mugen = False  # 32 <-> 128
+        self.mugen = mugen  # 32 <-> 128
 
     def encode(self, x):
         z = super().encode(x)
@@ -367,7 +357,7 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
             pj=self.ps[1],
         )
 
-        z = torch.nn.functional.batch_norm(
+        z = F.batch_norm(
             z,
             memory_management.cast_to(self.bn.running_mean, dtype=z.dtype, device=z.device),
             memory_management.cast_to(self.bn.running_var, dtype=z.dtype, device=z.device),
@@ -392,12 +382,6 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
 
         return super().decode(z)
 
-    def process_in(self, latent):
-        return latent
-
-    def process_out(self, latent):
-        return latent
-
     def preprocess_decode(self, latent: torch.Tensor):
         packed_channels: int = latent.size(1)
         latent_channels: int = 128
@@ -409,7 +393,7 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
             if h % scale_factor != 0 or w % scale_factor != 0:
                 pad_h = (scale_factor - (h % scale_factor)) % scale_factor
                 pad_w = (scale_factor - (w % scale_factor)) % scale_factor
-                latent = torch.nn.functional.pad(latent, (0, pad_w, 0, pad_h))
+                latent = F.pad(latent, (0, pad_w, 0, pad_h))
                 h = latent.shape[-2]
                 w = latent.shape[-1]
             latent = latent.reshape(latent.shape[0], packed_channels, h // scale_factor, scale_factor, w // scale_factor, scale_factor)

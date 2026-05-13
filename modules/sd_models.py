@@ -337,12 +337,22 @@ def forge_model_reload():
     state_dict = checkpoint_info.filename
     additional_state_dicts = model_data.forge_loading_parameters.get("additional_modules", [])
 
-    timer.record("cache state dict")
-
     dynamic_args.forge_unet_storage_dtype = model_data.forge_loading_parameters.get("unet_storage_dtype", None)
     dynamic_args.embedding_dir = cmd_opts.embeddings_dir
-    sd_model = forge_loader(state_dict, additional_state_dicts=additional_state_dicts)
-    timer.record("forge model load")
+
+    try:
+        sd_model = forge_loader(state_dict, additional_state_dicts=additional_state_dicts)
+    except Exception as e:
+        model_data.sd_model = FakeInitialModel()
+        model_data.forge_loading_parameters = {}
+        model_data.forge_hash = ""
+        errors.display(e, "forge_loader")
+        memory_management.logger.error("Failed to load diffusion model... (check README for supported models)")
+        raise BufferError("Failed to load diffusion model...") from None
+    else:
+        timer.record("forge model load")
+    finally:
+        memory_management.soft_empty_cache()
 
     sd_model.extra_generation_params = {}
     sd_model.comments = []
@@ -354,7 +364,7 @@ def forge_model_reload():
     shared.opts.data["sd_checkpoint_hash"] = checkpoint_info.sha256
     model_data.set_sd_model(sd_model)
 
-    processing.opt_f = 16 if sd_model.__class__.__name__ == "Flux2" else 8
+    processing.opt_f = sd_model.forge_objects.vae.upscale_ratio if isinstance(sd_model.forge_objects.vae.upscale_ratio, int) else 8
     script_callbacks.model_loaded_callback(sd_model)
     timer.record("scripts callbacks")
 
