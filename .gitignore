@@ -1,8 +1,5 @@
 __pycache__
-.claude/
-.DS_Store
-.idea/
-.vscode
+**/tokenizer/tokenizer.json
 *.bin
 *.ckpt
 *.gguf
@@ -10,11 +7,11 @@ __pycache__
 *.pth
 *.safetensors
 *.sft
-**/tokenizer/tokenizer.json
-/.venv
+.DS_Store
+.vscode
 /cache
-/config_states/
 /config.json
+/config_states/
 /embeddings
 /extensions
 /models/**/*
@@ -32,5 +29,3 @@ __pycache__
 /webui-user.bat
 /webui-user.sh
 notification.mp3
-uv.lock
-webui-user-*.bat

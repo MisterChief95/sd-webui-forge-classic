@@ -1,22 +1,3 @@
-<h1>Fork Overview</h1>
-
-<p>This is a fork of Forge Neo that has some personal modifications in it.</p>
-<h2>Features:</h2>
-
-- Iterative HiRes Fix
-    - Progressively upscales using HiRes Fix until the desired target scale or width/height is reached
-    - Allows linearly interpolating CFG/Denoise/Steps. EX: high denoise for early iterations, low denoise for later
-- Borrows some additional sampler implementations from ComfyUI
-- Adds back FreeU and Perturbed Attention Guidance
-- CFG==1 optimization Toggle
-    - Allows setting CFG as low as 0
-    - Useful for extension/sampler combinations that require very low CFG
-- Tweaked memory tracking
-    - App does its best to only unload/reload models when absolutely necessary
-    - This was added with high VRAM in mind and may not work on low VRAM GPUs    
-
-<hr/>
-
 <h1 align="center">Stable Diffusion WebUI Forge - Neo</h1>
 
 <p align="center"><sup>
@@ -116,7 +97,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Support [SageAttention](https://github.com/thu-ml/SageAttention), [FlashAttention](https://github.com/Dao-AILab/flash-attention), `fp16_accumulation`, `torch._scaled_mm`
     - see [Commandline](#by-neo)
 - [X] Implement Triton Kernel for `matmul` in `torch.int8`
-    - speed up `bf16` models
+    - speed up inference after quantization
     - enable by selecting `int8` in the `Diffusion in Low Bits`
 - [X] Implement [Radial Attention](https://github.com/mit-han-lab/radial-attention)
     - speed up `Wan 2.2`
@@ -219,6 +200,10 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - update descriptions
 - [X] Check for Extension updates in parallel
 - [X] Move `embeddings` folder into `models` folder
+- [X] Infotext Rewrite
+    - allow switching Models and Modules
+    - save `emphasis` properly
+    - correct default values
 - [X] ControlNet Rewrite
     - change Units to `gr.Tab`
     - remove multi-inputs, as they are "[misleading](https://github.com/lllyasviel/stable-diffusion-webui-forge/discussions/932)"
@@ -356,7 +341,8 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 <br>
 
 > [!Tip]
-> For **Linux** and **macOS**, refer to [Wiki](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Unix)
+> - For **Linux** and **macOS**, refer to [Wiki](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Unix)
+> - For **Docker** (`Nvidia`), refer to [Docker](docker/)
 
 <br>
 
@@ -426,4 +412,12 @@ Buy me a <a href="https://ko-fi.com/Haoming">Coffee</a> ☕~
 <sub><i>
 <a href="https://paypal.me/hmgamingdonation">PayPal</a> me 💳~
 </i></sub>
+</p>
+
+<br>
+
+<p align="center">
+	<a href="https://www.star-history.com/?repos=Haoming02%2Fsd-webui-forge-classic&type=date&legend=top-left">
+		<img src="https://api.star-history.com/chart?repos=Haoming02/sd-webui-forge-classic&type=date&legend=top-left">
+	</a>
 </p>

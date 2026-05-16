@@ -314,7 +314,6 @@ options_templates.update(
         ("optimizations", "Optimizations", "sd"),
         {
             "cross_attention_optimization": OptionInfo("Automatic", "Cross Attention Optimization", gr.Dropdown, {"choices": ("Automatic",), "interactive": False}),
-            "disable_cfg1_optimization": OptionInfo(False, "Disable CFG 1.0 Optimization").info("may improve quality slightly at the cost of speed. Allows CFG <= 1").needs_reload_ui(),
             "persistent_cond_cache": OptionInfo(True, "Persistent Cond Cache").info("do not re-encode prompts if only the Seed changes ; <b>Note:</b> may cause certain Infotext to be missing"),
             "skip_early_cond": OptionInfo(0.0, "Ignore Negative Prompt during Early Steps", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.05}, infotext="Skip Early CFG").info("in percentage of total steps; 0 = disable; higher = faster"),
             "s_min_uncond": OptionInfo(0.0, "Skip Negative Prompt during Later Steps", gr.Slider, {"minimum": 0.0, "maximum": 8.0, "step": 0.05}).info('in "sigma"; 0 = disable; higher = faster'),
@@ -464,6 +463,8 @@ options_templates.update(
             "send_seed": OptionInfo(True, 'Send the Seed information when using the "Send to" buttons'),
             "send_cfg": OptionInfo(True, 'Send the CFG information when using the "Send to" buttons'),
             "send_size": OptionInfo(True, 'Send the Resolution information when using the "Send to" buttons'),
+            "send_image_info_not_ui": OptionInfo(False, 'Send the Parameters in the infotext instead of the UI fields when using the "Send to" buttons').info("<b>e.g.</b> send the result of Wildcards instead of the syntax").needs_reload_ui(),
+            "allow_i2i_send_info": OptionInfo(False, 'Send the Parameters too when using the "Send to" buttons in img2img tab').info("otherwise only the image is sent").needs_reload_ui(),
             "enable_reloading_ui_scripts": OptionInfo(False, 'Additionally reload the "modules.ui" scripts when using "Reload UI"').info("for developing"),
         },
     )
@@ -478,10 +479,10 @@ options_templates.update(
             "save_txt": OptionInfo(False, "Write infotext to a text file next to every generated image"),
             "add_model_name_to_info": OptionInfo(True, "Add model name to infotext"),
             "add_model_hash_to_info": OptionInfo(True, "Add model hash to infotext"),
-            "add_vae_name_to_info": OptionInfo(True, "Add VAE name to infotext"),
-            "add_vae_hash_to_info": OptionInfo(True, "Add VAE hash to infotext"),
             "add_user_name_to_info": OptionInfo(False, "Add user name to infotext when authenticated"),
             "add_version_to_infotext": OptionInfo(True, "Add webui version to infotext"),
+            "disable_weights_auto_swap": OptionInfo(True, "Ignore the Checkpoint when reading infotext"),
+            "disable_modules_auto_swap": OptionInfo(True, "Ignore the VAE / Text Encoder when reading infotext"),
             "infotext_skip_pasting": OptionInfo([], "Ignore fields when reading infotext", ui_components.DropdownMulti, lambda: {"choices": shared_items.get_infotext_names()}),
             "infotext_styles": OptionInfo("Apply if any", "Infer Styles when reading infotext", gr.Radio, {"choices": ("Ignore", "Apply", "Apply if any", "Discard")}).html("""
 <ul style='margin-left: 1.5em'>

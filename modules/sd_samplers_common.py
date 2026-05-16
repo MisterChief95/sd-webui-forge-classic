@@ -20,7 +20,10 @@ SamplerDataTuple = namedtuple("SamplerData", ["name", "constructor", "aliases", 
 
 class SamplerData(SamplerDataTuple):
     def total_steps(self, steps):
-        return steps * self.options.get("sampler_order", 1)
+        if self.options.get("second_order", False):
+            steps = steps * 2
+
+        return steps
 
 
 def setup_img2img_steps(p, steps=None):

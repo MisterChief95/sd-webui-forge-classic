@@ -46,10 +46,8 @@ class UiLoadsave:
 
             if getattr(obj, "do_not_save_to_config", False):
                 return
-            
-            # NEW: Check if this specific field should be excluded
-            do_not_save_fields = getattr(obj, "do_not_save_fields", [])
-            if field in do_not_save_fields:
+
+            if field == "value" and getattr(obj, "_internal_preset_param", False):
                 return
 
             saved_value = self.ui_settings.get(key, None)

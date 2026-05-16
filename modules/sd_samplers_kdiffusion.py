@@ -13,7 +13,7 @@ from modules.shared import opts
 
 samplers_k_diffusion = [
     ("DPM++ 2M", "sample_dpmpp_2m", ["k_dpmpp_2m"], {"scheduler": "karras"}),
-    ("DPM++ SDE", "sample_dpmpp_sde", ["k_dpmpp_sde"], {"scheduler": "karras", "sampler_order": 2, "brownian_noise": True}),
+    ("DPM++ SDE", "sample_dpmpp_sde", ["k_dpmpp_sde"], {"scheduler": "karras", "second_order": True, "brownian_noise": True}),
     ("DPM++ 2M SDE", "sample_dpmpp_2m_sde", ["k_dpmpp_2m_sde"], {"scheduler": "exponential", "brownian_noise": True}),
     ("DPM++ 3M SDE", "sample_dpmpp_3m_sde", ["k_dpmpp_3m_sde"], {"scheduler": "exponential", "discard_next_to_last_sigma": True, "brownian_noise": True}),
     ("Flux Realistic" if opts.forbidden_knowledge else "DPM++ 2s a RF", "sample_dpmpp_2s_ancestral_RF", ["sample_dpmpp_2s_ancestral_RF"], {}),
@@ -22,11 +22,11 @@ samplers_k_diffusion = [
     ("ER SDE", "sample_er_sde", ["er_sde"], {}),
     ("LCM", "sample_lcm", ["k_lcm"], {}),
     ("LMS", "sample_lms", ["k_lms"], {}),
-    ("Heun", "sample_heun", ["k_heun"], {"sampler_order": 2}),
-    ("DPM2", "sample_dpm_2", ["k_dpm_2"], {"scheduler": "karras", "discard_next_to_last_sigma": True, "sampler_order": 2}),
+    ("Heun", "sample_heun", ["k_heun"], {"second_order": True}),
+    ("DPM2", "sample_dpm_2", ["k_dpm_2"], {"scheduler": "karras", "discard_next_to_last_sigma": True, "second_order": True}),
     ("Res Multistep", "sample_res_multistep", ["res_multistep"], {}),
     ("Kohaku LoNyu Yog", "sample_Kohaku_LoNyu_Yog", ["Kohaku_LoNyu_Yog"], {}),
-    ("Restart", sd_samplers_extra.restart_sampler, ["restart"], {"scheduler": "karras", "sampler_order": 2}),
+    ("Restart", sd_samplers_extra.restart_sampler, ["restart"], {"scheduler": "karras", "second_order": True}),
     ("UniPC", sd_samplers_extra.sample_unipc, ["unipc"], {"discard_next_to_last_sigma": True}),
 ]
 
