@@ -7,7 +7,10 @@ import math
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from backend.diffusion_engine.base import ForgeDiffusionEngine
 
 import cv2
 import numpy as np
@@ -135,7 +138,7 @@ def txt2img_image_conditioning(sd_model, x, width, height):
 
 @dataclass(repr=False)
 class StableDiffusionProcessing:
-    sd_model: object = None
+    sd_model: "ForgeDiffusionEngine" = None
     outpath_samples: str = None
     outpath_grids: str = None
     prompt: str = ""
@@ -273,11 +276,11 @@ class StableDiffusionProcessing:
         self.s_noise = self.s_noise if self.s_noise is not None else opts.s_noise
 
     @property
-    def sd_model(self):
+    def sd_model(self) -> "ForgeDiffusionEngine":
         return shared.sd_model
 
     @sd_model.setter
-    def sd_model(self, value):
+    def sd_model(self, _):
         pass
 
     @property
@@ -740,7 +743,7 @@ def create_infotext(p, all_prompts, all_seeds, all_subseeds, comments=None, iter
             "Variation seed": (None if p.subseed_strength == 0 else (p.all_subseeds[0] if use_main_prompt else all_subseeds[index])),
             "Variation seed strength": (None if p.subseed_strength == 0 else p.subseed_strength),
             "Seed resize from": (None if p.seed_resize_from_w <= 0 or p.seed_resize_from_h <= 0 else f"{p.seed_resize_from_w}x{p.seed_resize_from_h}"),
-            "Denoising strength": p.extra_generation_params.pop("Denoising strength", None),
+            "Denoising strength": p.extra_generation_params.get("Denoising strength", None),
             "Conditional mask weight": getattr(p, "inpainting_mask_weight", shared.opts.inpainting_mask_weight) if p.is_using_inpainting_conditioning else None,
             "Clip skip": clip_skip if p.sd_model.is_sd1 else None,
             "ENSD": opts.eta_noise_seed_delta if uses_ensd else None,
@@ -2088,7 +2091,11 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         devices.torch_gc()
 
         if self.resize_mode == 3:
+            if _5d := (self.init_latent.ndim == 5):
+                self.init_latent = self.init_latent.squeeze(2)
             self.init_latent = torch.nn.functional.interpolate(self.init_latent, size=(self.height // opt_f, self.width // opt_f), mode="bilinear")
+            if _5d:
+                self.init_latent = self.init_latent.unsqueeze(2)
 
         if image_mask is not None:
             init_mask = latent_mask
