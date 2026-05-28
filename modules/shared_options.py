@@ -163,6 +163,7 @@ options_templates.update(
         ("system", "System", "system"),
         {
             "setting_allocated_vram": OptionInfo(1.0, "GPU Weights", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.05}).info("amount of VRAM that Forge can access").info("in % of total vram"),
+            "res_step": OptionInfo(64, "Resolution Step", gr.Radio, {"choices": (8, 16, 32, 64, 128, 256)}).info('"64" is recommended to prevent compatibility issues').needs_restart(),
             "auto_launch_browser": OptionInfo("Local", "Launch the webui in browser on startup", gr.Radio, {"choices": ("Disable", "Local", "Remote")}).info("Remote = always automatically start; Local = only when not sharing the server, such as <b>--share</b>"),
             "enable_console_prompts": OptionInfo(False, "Print the generation prompts to console"),
             "samples_log_stdout": OptionInfo(False, "Print the generation infotxt to console"),
@@ -262,7 +263,6 @@ image to and from latent space representation. Latent space is what Stable Diffu
 to create the resulting image after the sampling is finished. For img2img, VAE is additionally used to process user's input image before the sampling.
                 """),
             "sd_vae": OptionInfo("Automatic", "SD VAE", gr.Dropdown, {"choices": ("Automatic",), "interactive": False}),
-            "sd_vae_overrides_per_model_preferences": OptionInfo(True, '"SD VAE" option overrides per-model preference'),
             "sd_vae_encode_method": OptionInfo("Full", "VAE for Encoding", gr.Radio, {"choices": ("Full", "TAESD")}, infotext="VAE Encoder").info("method to encode image to latent (img2img / Hires. fix / inpaint)"),
             "sd_vae_decode_method": OptionInfo("Full", "VAE for Decoding", gr.Radio, {"choices": ("Full", "TAESD")}, infotext="VAE Decoder").info("method to decode latent to image"),
         },
