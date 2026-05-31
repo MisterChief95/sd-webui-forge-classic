@@ -58,6 +58,18 @@ def gr_show(visible=True):
     return {"visible": visible, "__type__": "update"}
 
 
+minimum_cfg: float = 1.0 if opts.disable_cfg1_optimization else 1.0
+
+def use_cfg(val: float | None):
+    if val is None:
+        return gr.skip()
+    elif opts.disable_cfg1_optimization:
+        return gr.update(interactive=(val > 0.0))
+    else:
+        return gr.update(interactive=(val > 1.0))
+
+
+
 def no_config(*comps: gr.components.Component):
     for comp in comps:
         setattr(comp, "_internal_preset_param", True)
@@ -191,8 +203,6 @@ def create_ui():
     scripts.scripts_current = scripts.scripts_txt2img
     scripts.scripts_txt2img.initialize_scripts(is_img2img=False)
 
-    minimum_cfg: float = 0.0 if opts.disable_cfg1_optimization else 1.0
-
     with gr.Blocks(analytics_enabled=False, head=canvas_head) as txt2img_interface:
         toprow = ui_toprow.Toprow(is_img2img=False)
 
@@ -233,8 +243,7 @@ def create_ui():
                             distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label="Distilled CFG Scale", value=3.5, elem_id="txt2img_distilled_cfg_scale", scale=4)
                             cfg_scale = gr.Slider(minimum=minimum_cfg, maximum=30.0, step=0.1, label="CFG Scale", value=7.0, elem_id="txt2img_cfg_scale", scale=4)
                             setattr(cfg_scale, "do_not_save_fields", ["minimum"])
-                            if not opts.disable_cfg1_optimization:
-                                cfg_scale.change(lambda x: gr.update(interactive=(x != 1)), inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
+                            cfg_scale.change(fn=use_cfg, inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
                             scripts.scripts_txt2img.setup_ui_for_section(category)
 
                     elif category == "accordions":
@@ -304,8 +313,7 @@ def create_ui():
                                         with gr.Column():
                                             hr_iter_target_cfg = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label="Target CFG", value=0, elem_id="txt2img_hr_iter_target_cfg", interactive=False)
 
-                                if not opts.disable_cfg1_optimization:
-                                    hr_cfg.change(lambda x: gr.update(interactive=(x != 1)), inputs=[hr_cfg], outputs=[hr_negative_prompt], queue=False, show_progress=False)
+                                hr_cfg.change(fn=use_cfg, inputs=[hr_cfg], outputs=[hr_negative_prompt], queue=False, show_progress=False)
 
                                 hr_iterations.change(
                                     fn=lambda steps: [gr.update(interactive=steps > 1)] * 3,
@@ -666,8 +674,7 @@ def create_ui():
                             cfg_scale = gr.Slider(minimum=minimum_cfg, maximum=30.0, step=0.1, label="CFG Scale", value=7.0, elem_id="img2img_cfg_scale", scale=4)
                             setattr(cfg_scale, "do_not_save_fields", ["minimum"])
                             image_cfg_scale = gr.Slider(minimum=0, maximum=3.0, step=0.05, label="Image CFG Scale", value=1.5, elem_id="img2img_image_cfg_scale", visible=False)
-                            if not opts.disable_cfg1_optimization:
-                                cfg_scale.change(lambda x: gr.update(interactive=(x != 1)), inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
+                            cfg_scale.change(fn=use_cfg, inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
                             scripts.scripts_img2img.setup_ui_for_section(category)
 
                     elif category == "accordions":
