@@ -24,6 +24,7 @@ else:
 
 _COMPILE_CONFIG_KEY = "_torch_compile_config"
 _ORIG_APPLY_KEY = "_orig_apply_model"
+_COMPILE_WRAPPER_KEY = "_torch_compile_wrapper"
 
 logger = logging.getLogger("compile")
 setup_logger(logger)
@@ -95,8 +96,6 @@ class TorchCompileForForge(scripts.Script):
         if _config == prev_config:
             return
 
-        setattr(kmodel, _COMPILE_CONFIG_KEY, _config)
-
         if prev_config is not None:
             self._remove_compile_wrapper(kmodel)
 
@@ -113,23 +112,41 @@ class TorchCompileForForge(scripts.Script):
                 config = dict(backend="inductor", mode="reduce-overhead", dynamic=False, fullgraph=False)
 
         self._wrap_apply_model(kmodel, config)
+        setattr(kmodel, _COMPILE_CONFIG_KEY, _config)
 
         logger.info(f"Model Compiled ({preset})")
 
     @staticmethod
-    def _wrap_apply_model(kmodel: "KModel", compile_config: dict):
-        setattr(kmodel, _ORIG_APPLY_KEY, kmodel.apply_model)
+    def _is_compile_wrapper(fn):
+        if getattr(fn, _COMPILE_WRAPPER_KEY, False):
+            return True
 
-        @wraps(kmodel._orig_apply_model)
+        code = getattr(fn, "__code__", None)
+        return code is not None and {"compile_config", "kmodel"}.issubset(code.co_freevars)
+
+    @staticmethod
+    def _default_apply_model(kmodel: "KModel"):
+        return type(kmodel).apply_model.__get__(kmodel, type(kmodel))
+
+    @staticmethod
+    def _wrap_apply_model(kmodel: "KModel", compile_config: dict):
+        if TorchCompileForForge._is_compile_wrapper(kmodel.apply_model):
+            TorchCompileForForge._remove_compile_wrapper(kmodel)
+
+        original_apply_model = kmodel.apply_model
+        setattr(kmodel, _ORIG_APPLY_KEY, original_apply_model)
+
+        @wraps(original_apply_model)
         def apply_model_with_compile(*args, **kwargs):
             orig_model = get_attr(kmodel, "diffusion_model")
             compiled = torch.compile(orig_model, **compile_config)
             set_attr_raw(kmodel, "diffusion_model", compiled)
             try:
-                return kmodel._orig_apply_model(*args, **kwargs)
+                return original_apply_model(*args, **kwargs)
             finally:
                 set_attr_raw(kmodel, "diffusion_model", orig_model)
 
+        setattr(apply_model_with_compile, _COMPILE_WRAPPER_KEY, True)
         kmodel.apply_model = apply_model_with_compile
 
     @staticmethod
@@ -137,5 +154,12 @@ class TorchCompileForForge(scripts.Script):
         if (orig := getattr(kmodel, _ORIG_APPLY_KEY, None)) is not None:
             kmodel.apply_model = orig
             delattr(kmodel, _ORIG_APPLY_KEY)
-            delattr(kmodel, _COMPILE_CONFIG_KEY)
             logger.info("Model Decompiled")
+        elif TorchCompileForForge._is_compile_wrapper(kmodel.apply_model):
+            kmodel.apply_model = TorchCompileForForge._default_apply_model(kmodel)
+            logger.warning("Recovered a Torch Compile wrapper with no saved original apply_model")
+
+        if hasattr(kmodel, _ORIG_APPLY_KEY):
+            delattr(kmodel, _ORIG_APPLY_KEY)
+        if hasattr(kmodel, _COMPILE_CONFIG_KEY):
+            delattr(kmodel, _COMPILE_CONFIG_KEY)
