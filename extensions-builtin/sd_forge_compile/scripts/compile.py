@@ -51,9 +51,8 @@ class TorchCompileForForge(scripts.Script):
         with gr.Accordion(open=False, label=self.title()):
             preset = gr.Dropdown(
                 label="Preset",
-                value="Automatic",
+                value="Disable",
                 choices=[
-                    "Automatic",
                     "Disable",
                     "guard_filter_fn",
                     "dynamic",
@@ -61,7 +60,6 @@ class TorchCompileForForge(scripts.Script):
                     "max-autotune-no-cudagraphs",
                     "reduce-overhead",
                 ],
-                info='"Automatic" maintains the current compile status',
             )
 
             _dynamic = "Support any Resolution / Batch Size"
@@ -82,9 +80,11 @@ class TorchCompileForForge(scripts.Script):
     def process_batch(self, p, preset: str, **kwargs):
         kmodel: "KModel" = p.sd_model.forge_objects.unet.model
         prev_config: tuple[str] = getattr(kmodel, _COMPILE_CONFIG_KEY, None)
-        enable: bool = (prev_config is not None) if preset == "Automatic" else (preset != "Disable")
 
-        if not enable:
+        if preset == "Automatic":
+            return
+
+        if preset == "Disable":
             self._remove_compile_wrapper(kmodel)
             return
 
@@ -93,10 +93,10 @@ class TorchCompileForForge(scripts.Script):
             return
 
         _config: tuple[str] = (preset,)
-        if _config == prev_config:
+        if _config == prev_config and getattr(kmodel, _ORIG_APPLY_KEY, None) is not None:
             return
 
-        if prev_config is not None:
+        if prev_config is not None or self._is_compile_wrapper(kmodel.apply_model):
             self._remove_compile_wrapper(kmodel)
 
         match preset:
@@ -110,6 +110,9 @@ class TorchCompileForForge(scripts.Script):
                 config = dict(backend="inductor", dynamic=True, fullgraph=False, options={"coordinate_descent_tuning": True, "max_autotune": True})
             case "reduce-overhead":
                 config = dict(backend="inductor", mode="reduce-overhead", dynamic=False, fullgraph=False)
+            case _:
+                logger.error(f"Unknown torch.compile preset: {preset}")
+                return
 
         self._wrap_apply_model(kmodel, config)
         setattr(kmodel, _COMPILE_CONFIG_KEY, _config)
