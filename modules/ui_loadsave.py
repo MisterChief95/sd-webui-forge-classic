@@ -49,7 +49,7 @@ class UiLoadsave:
                 return
 
             if getattr(obj, "_internal_preset_param", False):
-                if field in ("value", "step"):
+                if field in ("value", "minimum", "step"):
                     return
 
             saved_value = self.ui_settings.get(key, None)

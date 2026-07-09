@@ -98,7 +98,7 @@ def weights_manual_cast(
 
     if stream.should_use_stream():
         offload_stream = memory_management.get_offload_stream(target_device)
-        context = stream.stream_context()(offload_stream)
+        context = stream.stream_context()(offload_stream) if offload_stream is not None else None
     else:
         offload_stream = None
         context = None
@@ -631,7 +631,9 @@ class ForgeOperationsInt8(ForgeOperations):
             need_cast = self.parameters_manual_cast or len(self.weight_function) > 0 or len(self.bias_function) > 0
 
             if not self._is_quantized:
-                if need_cast:
+                weight_dtype_mismatch = self.weight is not None and self.weight.dtype != x.dtype
+                bias_dtype_mismatch = self.bias is not None and self.bias.dtype != x.dtype
+                if need_cast or weight_dtype_mismatch or bias_dtype_mismatch:
                     weight, bias, signal = weights_manual_cast(self, x)
                     with main_stream_worker(weight, bias, signal):
                         return torch.nn.functional.linear(x, weight, bias)
