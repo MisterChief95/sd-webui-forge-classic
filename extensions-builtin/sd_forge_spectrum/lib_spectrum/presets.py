@@ -7,11 +7,22 @@ import gradio as gr
 from lib_spectrum import logger
 
 PRESET_FILE: Final[os.PathLike] = os.path.join(os.path.dirname(os.path.dirname(__file__)), "presets.json")
-PARAMS: Final[list[type]] = [float, int, float, int, float, int, float]
+
+
+def to_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+
+    return bool(value)
+
+
+BASE_PARAMS: Final[list] = [float, int, float, int, float, int, float]
+PARAMS: Final[list] = [*BASE_PARAMS, to_bool, to_bool, *BASE_PARAMS]
+BASE_PARAM_COUNT: Final[int] = len(BASE_PARAMS)
 
 
 class PresetManager:
-    presets: dict[str, list[float]] = None
+    presets: dict[str, list] = None
 
     @classmethod
     def load_presets(cls):
@@ -40,20 +51,58 @@ class PresetManager:
         return list(cls.presets.keys())
 
     @classmethod
-    def get_preset(cls, preset_name: str) -> list[float]:
+    def get_preset(cls, preset_name: str) -> list:
         if (preset := cls.presets.get(preset_name, None)) is None:
             logger.error(f'Preset "{preset_name}" was not found...')
             return [gr.skip()] * len(PARAMS)
 
-        return [gr.update(value=obj(val)) for obj, val in zip(PARAMS, preset)]
+        if isinstance(preset, dict):
+            base_preset = preset.get("base", [])
+            hires_preset = preset.get("hires", base_preset)
+            if len(base_preset) != BASE_PARAM_COUNT or len(hires_preset) != BASE_PARAM_COUNT:
+                logger.error(f'Preset "{preset_name}" has an unsupported format...')
+                return [gr.skip()] * len(PARAMS)
+
+            preset = [
+                *[obj(val) for obj, val in zip(BASE_PARAMS, base_preset)],
+                to_bool(preset.get("apply_to_hires", True)),
+                to_bool(preset.get("override_hires", False)),
+                *[obj(val) for obj, val in zip(BASE_PARAMS, hires_preset)],
+            ]
+        elif len(preset) == len(BASE_PARAMS):
+            base_preset = [obj(val) for obj, val in zip(BASE_PARAMS, preset)]
+            preset = [*base_preset, True, False, *base_preset]
+        elif len(preset) == len(PARAMS):
+            preset = [obj(val) for obj, val in zip(PARAMS, preset)]
+        else:
+            logger.error(f'Preset "{preset_name}" has an unsupported format...')
+            return [gr.skip()] * len(PARAMS)
+
+        return [gr.update(value=val) for val in preset]
 
     @classmethod
-    def save_preset(cls, preset_name: str, *args: float) -> list[str]:
+    def save_preset(cls, preset_name: str, *args) -> list[str]:
         if preset_name is None or not preset_name.strip():
             logger.error("Invalid Preset Name...")
             return gr.skip()
 
-        cls.presets.update({preset_name: [*args]})
+        if len(args) != len(PARAMS):
+            logger.error("Invalid Spectrum preset data...")
+            return gr.skip()
+
+        base_args = args[:BASE_PARAM_COUNT]
+        apply_to_hires = args[BASE_PARAM_COUNT]
+        override_hires = args[BASE_PARAM_COUNT + 1]
+        hires_args = args[BASE_PARAM_COUNT + 2:]
+
+        cls.presets.update({
+            preset_name: {
+                "base": [*base_args],
+                "apply_to_hires": apply_to_hires,
+                "override_hires": override_hires,
+                "hires": [*hires_args],
+            }
+        })
 
         with open(PRESET_FILE, "w", encoding="utf-8") as json_file:
             dump(cls.presets, json_file)

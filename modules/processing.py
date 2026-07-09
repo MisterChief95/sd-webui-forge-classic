@@ -477,7 +477,7 @@ class StableDiffusionProcessing:
         self.step_multiplier = total_steps // self.steps
         self.firstpass_steps = total_steps
 
-        if self.cfg_scale == 1:
+        if self.cfg_scale == 1 and not opts.disable_cfg1_optimization:
             self.uc = None
             logger.info("Negative Prompts are Ignored when CFG = 1.0")
         else:
@@ -1224,6 +1224,10 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
     hr_negative_prompt: str = ""
     hr_cfg: float = 1.0
     hr_distilled_cfg: float = 3.5
+    hr_iterations: int = 1
+    hr_iter_target_steps: int = 0
+    hr_iter_target_denoise: float = 0.0
+    hr_iter_target_cfg: float = 0.0
     force_task_id: str = None
 
     cached_hr_uc = [None, None, None]
@@ -1255,6 +1259,73 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
 
         self.cached_hr_uc = StableDiffusionProcessingTxt2Img.cached_hr_uc
         self.cached_hr_c = StableDiffusionProcessingTxt2Img.cached_hr_c
+
+    def calculate_iteration_params(self, iteration: int, total_iterations: int,
+                                   base_width: int, base_height: int,
+                                   target_width: int, target_height: int) -> dict:
+        """
+        Calculate parameters for a specific iteration in the progressive upscaling sequence.
+
+        Args:
+            iteration: Current iteration number (1-indexed)
+            total_iterations: Total number of iterations
+            base_width/height: Starting resolution
+            target_width/height: Final target resolution
+
+        Returns:
+            Dictionary with 'width', 'height', 'steps', 'denoise', 'cfg'
+        """
+
+        # Geometric progression for resolution
+        # Formula: scale_factor = (target / base) ^ (1 / iterations)
+        # For iteration i: resolution_i = base * scale_factor^i
+
+        scale_factor_w = (target_width / base_width) ** (1.0 / total_iterations)
+        scale_factor_h = (target_height / base_height) ** (1.0 / total_iterations)
+
+        iter_width = int(base_width * (scale_factor_w ** iteration))
+        iter_height = int(base_height * (scale_factor_h ** iteration))
+
+        # Ensure divisible by 8 (latent space requirement)
+        iter_width = (iter_width // 8) * 8
+        iter_height = (iter_height // 8) * 8
+
+        # For final iteration, use exact target to avoid rounding errors
+        if iteration == total_iterations:
+            iter_width = target_width
+            iter_height = target_height
+
+        # Linear interpolation for parameters
+        progress = iteration / total_iterations  # 0.0 to 1.0
+
+        # Steps
+        if self.hr_iter_target_steps > 0:
+            base_steps = self.hr_second_pass_steps or self.steps
+            iter_steps = int(base_steps + (self.hr_iter_target_steps - base_steps) * progress)
+        else:
+            iter_steps = self.hr_second_pass_steps or self.steps
+
+        # Denoising strength
+        if self.hr_iter_target_denoise > 0:
+            base_denoise = self.denoising_strength
+            iter_denoise = base_denoise + (self.hr_iter_target_denoise - base_denoise) * progress
+        else:
+            iter_denoise = self.denoising_strength
+
+        # CFG scale
+        if self.hr_iter_target_cfg > 0:
+            base_cfg = self.hr_cfg
+            iter_cfg = base_cfg + (self.hr_iter_target_cfg - base_cfg) * progress
+        else:
+            iter_cfg = self.hr_cfg
+
+        return {
+            'width': iter_width,
+            'height': iter_height,
+            'steps': iter_steps,
+            'denoise': iter_denoise,
+            'cfg': iter_cfg
+        }
 
     def calculate_target_resolution(self):
         if opts.use_old_hires_fix_width_height and self.applied_old_hires_behavior_to != (self.width, self.height):
@@ -1315,6 +1386,35 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
                     for i, m in enumerate(self.hr_additional_modules):
                         self.extra_generation_params[f"Hires Module {i+1}"] = os.path.splitext(os.path.basename(m))[0]
 
+            if self.hr_sampler_name is not None and self.hr_sampler_name != self.sampler_name:
+                self.extra_generation_params["Hires sampler"] = self.hr_sampler_name
+
+            def get_hr_prompt(p, index, prompt_text, **kwargs):
+                hr_prompt = p.all_hr_prompts[index]
+                if hr_prompt != prompt_text:
+                    if "[PROMPT]" in hr_prompt:
+                        hr_prompt = hr_prompt.replace("[PROMPT]", prompt_text)
+                    return hr_prompt
+                else:
+                    return None
+
+            def get_hr_negative_prompt(p, index, negative_prompt, **kwargs):
+                hr_negative_prompt = p.all_hr_negative_prompts[index]
+                if hr_negative_prompt != negative_prompt:
+                    if "[PROMPT]" in hr_negative_prompt:
+                        hr_negative_prompt = hr_negative_prompt.replace("[PROMPT]", negative_prompt)
+                    return hr_negative_prompt
+                else:
+                    return None
+
+            self.extra_generation_params["Hires prompt"] = get_hr_prompt
+            self.extra_generation_params["Hires negative prompt"] = get_hr_negative_prompt
+
+            self.extra_generation_params["Hires CFG Scale"] = self.hr_cfg
+            self.extra_generation_params["Hires Distilled CFG Scale"] = None  # set after potential hires model load
+
+            self.extra_generation_params["Hires schedule type"] = None  # to be set in sd_samplers_kdiffusion.py
+
             if self.hr_scheduler is None:
                 self.hr_scheduler = self.scheduler
 
@@ -1328,13 +1428,38 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
             if not state.processing_has_refined_job_count:
                 if state.job_count == -1:
                     state.job_count = self.n_iter
+
+                # Calculate total steps accounting for iterations
                 if getattr(self, "txt2img_upscale", False):
-                    total_steps = (self.hr_second_pass_steps or self.steps) * state.job_count
+                    # Upscale button: only HR passes
+                    hr_steps = self.hr_second_pass_steps or self.steps
+                    total_steps = hr_steps * self.hr_iterations * state.job_count
                 else:
-                    total_steps = (self.steps + (self.hr_second_pass_steps or self.steps)) * state.job_count
+                    # Normal txt2img: first pass + HR passes
+                    firstpass_steps = self.steps
+                    hr_steps = self.hr_second_pass_steps or self.steps
+                    total_steps = (firstpass_steps + (hr_steps * self.hr_iterations)) * state.job_count
+
                 shared.total_tqdm.updateTotal(total_steps)
-                state.job_count = state.job_count * 2
+
+                # Adjust job count: 1 first pass + N hires iterations
+                state.job_count = state.job_count * (1 + self.hr_iterations)
                 state.processing_has_refined_job_count = True
+
+            if self.hr_second_pass_steps:
+                self.extra_generation_params["Hires steps"] = self.hr_second_pass_steps
+
+            if self.hr_upscaler is not None:
+                self.extra_generation_params["Hires upscaler"] = self.hr_upscaler
+
+            if self.hr_iterations > 1:
+                self.extra_generation_params["Hires iterations"] = self.hr_iterations
+                if self.hr_iter_target_steps > 0:
+                    self.extra_generation_params["Hires target steps"] = self.hr_iter_target_steps
+                if self.hr_iter_target_denoise > 0:
+                    self.extra_generation_params["Hires target denoise"] = self.hr_iter_target_denoise
+                if self.hr_iter_target_cfg > 0:
+                    self.extra_generation_params["Hires target CFG"] = self.hr_iter_target_cfg
 
     def sample(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
         self.sampler = sd_samplers.create_sampler(self.sampler_name, self.sd_model)
@@ -1556,6 +1681,136 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         self.is_hr_pass = False
         return decoded_samples
 
+    def sample_hr_pass_iterative(self, samples, decoded_samples, seeds, subseeds,
+                                  subseed_strength, prompts):
+        """
+        Iteratively upscale and denoise samples through multiple hires fix passes.
+        Falls back to single-pass behavior when hr_iterations == 1.
+        """
+
+        # Backward compatibility: single iteration uses original method
+        if self.hr_iterations <= 1:
+            shared.state.job = "Hires fix"
+            samples = self.sample_hr_pass(samples, decoded_samples, seeds, subseeds,
+                                       subseed_strength, prompts)
+            shared.state.job = ""
+            return samples
+
+        # Store original target resolution and parameters
+        final_target_width = self.hr_upscale_to_x
+        final_target_height = self.hr_upscale_to_y
+        original_hr_steps = self.hr_second_pass_steps
+        original_denoise = self.denoising_strength
+        original_hr_cfg = self.hr_cfg
+
+        # Get starting resolution from current latent dimensions
+        if samples is not None:
+            opt_f = 8  # Standard VAE downscaling factor
+            base_width = samples.shape[3] * opt_f
+            base_height = samples.shape[2] * opt_f
+        else:
+            base_width = decoded_samples.shape[3]
+            base_height = decoded_samples.shape[2]
+
+        # Iteration loop
+        current_samples = samples
+        current_decoded = decoded_samples
+
+        for iteration in range(1, self.hr_iterations + 1):
+            if shared.state.interrupted:
+                break
+
+            # Update progress text
+            if self.hr_iterations == 1:
+                shared.state.textinfo = "Hires fix"
+            else:
+                shared.state.textinfo = f"Hires fix {iteration}/{self.hr_iterations}"
+
+            # Calculate parameters for this iteration
+            params = self.calculate_iteration_params(
+                iteration=iteration,
+                total_iterations=self.hr_iterations,
+                base_width=base_width,
+                base_height=base_height,
+                target_width=final_target_width,
+                target_height=final_target_height
+            )
+
+            # Temporarily update parameters
+            self.hr_upscale_to_x = params['width']
+            self.hr_upscale_to_y = params['height']
+            self.hr_second_pass_steps = params['steps']
+            self.denoising_strength = params['denoise']
+            self.hr_cfg = params['cfg']
+
+            # Clear cached HR conditioning (will be recalculated with new resolution)
+            self.hr_c = None
+            self.hr_uc = None
+
+            # Run one hires pass
+            current_decoded = self.sample_hr_pass(
+                current_samples,
+                current_decoded,
+                seeds,
+                subseeds,
+                subseed_strength,
+                prompts
+            )
+
+            # For next iteration: prepare inputs based on upscaler mode
+            if iteration < self.hr_iterations:
+                # Convert DecodedSamples (list of tensors) to stacked tensor
+                if hasattr(current_decoded, 'already_decoded'):
+                    # It's a DecodedSamples object (list-like)
+                    current_decoded_tensor = torch.stack([x for x in current_decoded])
+                elif isinstance(current_decoded, torch.Tensor):
+                    current_decoded_tensor = current_decoded
+                else:
+                    current_decoded_tensor = torch.from_numpy(current_decoded).to(
+                        shared.device, dtype=torch.float32
+                    )
+
+                # Normalize to [0, 1] if needed
+                if current_decoded_tensor.min() < 0:
+                    current_decoded_tensor = torch.clamp(
+                        (current_decoded_tensor + 1.0) / 2.0,
+                        min=0.0, max=1.0
+                    )
+
+                # Encode to latent space
+                if opts.sd_vae_encode_method != "Full":
+                    self.extra_generation_params["VAE Encoder"] = opts.sd_vae_encode_method
+
+                current_samples = images_tensor_to_samples(
+                    current_decoded_tensor,
+                    approximation_indexes.get(opts.sd_vae_encode_method or "Full")
+                )
+
+                # Prepare decoded_samples for next iteration based on upscaler mode
+                if self.latent_scale_mode is not None:
+                    # Latent-space upscaler: next iteration uses latent path
+                    current_decoded = None
+                else:
+                    # Pixel-space upscaler: next iteration needs decoded tensor
+                    # Decode the latents back to pixel space for the next iteration
+                    current_decoded = torch.stack(decode_latent_batch(self.sd_model, current_samples, target_device=devices.cpu, check_for_nans=True)).to(dtype=torch.float32)
+
+                # Memory cleanup
+                devices.torch_gc()
+                memory_management.free_memory(memory_management.minimum_inference_memory(), torch.device(device=shared.device))
+
+        # Restore original parameters
+        self.hr_upscale_to_x = final_target_width
+        self.hr_upscale_to_y = final_target_height
+        self.hr_second_pass_steps = original_hr_steps
+        self.denoising_strength = original_denoise
+        self.hr_cfg = original_hr_cfg
+
+        # Clear progress text
+        shared.state.textinfo = None
+
+        return current_decoded
+
     def close(self):
         super().close()
         self.hr_c = None
@@ -1600,7 +1855,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         steps = self.hr_second_pass_steps or self.steps
         total_steps = sampler_config.total_steps(steps) if sampler_config else steps
 
-        if self.hr_cfg == 1:
+        if self.hr_cfg == 1 and not opts.disable_cfg1_optimization:
             self.hr_uc = None
             logger.info("Negative Prompts are Ignored when CFG = 1.0")
         else:
