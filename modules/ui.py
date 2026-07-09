@@ -58,16 +58,8 @@ def gr_show(visible=True):
     return {"visible": visible, "__type__": "update"}
 
 
-minimum_cfg: float = 1.0 if opts.disable_cfg1_optimization else 1.0
-
 def use_cfg(val: float | None):
-    if val is None:
-        return gr.skip()
-    elif opts.disable_cfg1_optimization:
-        return gr.update(interactive=(val > 0.0))
-    else:
-        return gr.update(interactive=(val > 1.0))
-
+    return gr.skip() if val is None else gr.update(interactive=(val > 1.0))
 
 
 def no_config(*comps: gr.components.Component):
@@ -247,9 +239,8 @@ def create_ui():
 
                     elif category == "cfg":
                         with gr.Row():
-                            distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label="Distilled CFG Scale", value=3.5, elem_id="txt2img_distilled_cfg_scale", scale=4)
-                            cfg_scale = gr.Slider(minimum=minimum_cfg, maximum=30.0, step=0.1, label="CFG Scale", value=7.0, elem_id="txt2img_cfg_scale", scale=4)
-                            setattr(cfg_scale, "do_not_save_fields", ["minimum"])
+                            distilled_cfg_scale = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="Distilled CFG Scale", value=3.0, elem_id="txt2img_distilled_cfg_scale", scale=4)
+                            cfg_scale = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="CFG Scale", value=6.0, elem_id="txt2img_cfg_scale", scale=4)
                             cfg_scale.change(fn=use_cfg, inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
                             scripts.scripts_txt2img.setup_ui_for_section(category)
 
@@ -270,9 +261,8 @@ def create_ui():
                                     hr_resize_y = gr.Slider(minimum=0, maximum=4096, step=_STEP, label="Resize height to", value=0, elem_id="txt2img_hr_resize_y")
 
                                 with FormRow(elem_id="txt2img_hires_fix_row_cfg", variant="compact"):
-                                    hr_distilled_cfg = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label="Hires Distilled CFG Scale", value=3.5, elem_id="txt2img_hr_distilled_cfg")
-                                    hr_cfg = gr.Slider(minimum=minimum_cfg, maximum=30.0, step=0.1, label="Hires CFG Scale", value=7.0, elem_id="txt2img_hr_cfg")
-                                    setattr(hr_cfg, "do_not_save_fields", ["minimum"])
+                                    hr_distilled_cfg = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="Hires Distilled CFG Scale", value=3.0, elem_id="txt2img_hr_distilled_cfg")
+                                    hr_cfg = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="Hires CFG Scale", value=6.0, elem_id="txt2img_hr_cfg")
 
                                 with FormRow(elem_id="txt2img_hires_fix_row3", variant="compact", visible=shared.opts.hires_fix_show_sampler) as hr_checkpoint_container:
                                     hr_checkpoint_name = gr.Dropdown(label="Hires Checkpoint", elem_id="hr_checkpoint", choices=["Use same checkpoint"] + modules.sd_models.checkpoint_tiles(use_short=True), value="Use same checkpoint", scale=2)
@@ -308,27 +298,7 @@ def create_ui():
                                     with gr.Column():
                                         hr_negative_prompt = gr.Textbox(label="Hires negative prompt", elem_id="hires_neg_prompt", show_label=False, lines=3, placeholder="Negative prompt for hires fix pass.\nLeave empty to use the same negative prompt as in first pass.", elem_classes=["prompt"])
 
-                                with gr.Accordion(label="Iterative Upscale", open=False, elem_id="txt2img_hr_iter"):
-                                    with FormRow(elem_id="txt2img_hr_iter_row1", variant="compact"):
-                                        with gr.Column():
-                                            hr_iterations = gr.Slider(minimum=1, maximum=10, step=1, label="Iterations", value=1, elem_id="txt2img_hr_iter_steps")
-                                        with gr.Column():
-                                            hr_iter_target_steps = gr.Slider(minimum=0, maximum=100, step=1, label="Target steps", value=0, elem_id="txt2img_hr_iter_target_steps", interactive=False)
-                                    with FormRow(elem_id="txt2img_hr_iter_row2", variant="compact"):
-                                        with gr.Column():
-                                            hr_iter_target_denoise = gr.Slider(minimum=0.0, maximum=1.0, step=0.01, label="Target denoise", value=0, elem_id="txt2img_hr_iter_target_denoise", interactive=False)
-                                        with gr.Column():
-                                            hr_iter_target_cfg = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label="Target CFG", value=0, elem_id="txt2img_hr_iter_target_cfg", interactive=False)
-
                                 hr_cfg.change(fn=use_cfg, inputs=[hr_cfg], outputs=[hr_negative_prompt], queue=False, show_progress=False)
-
-                                hr_iterations.change(
-                                    fn=lambda steps: [gr.update(interactive=steps > 1)] * 3,
-                                    inputs=[hr_iterations],
-                                    outputs=[hr_iter_target_steps, hr_iter_target_denoise, hr_iter_target_cfg],
-                                    show_progress=False,
-                                    queue=False,
-                                )
 
                             scripts.scripts_txt2img.setup_ui_for_section(category)
 
@@ -396,10 +366,6 @@ def create_ui():
                 hr_negative_prompt,
                 hr_cfg,
                 hr_distilled_cfg,
-                hr_iterations,
-                hr_iter_target_steps,
-                hr_iter_target_denoise,
-                hr_iter_target_cfg,
                 override_settings,
             ] + custom_inputs
 
@@ -483,10 +449,6 @@ def create_ui():
                 PasteField(hr_cfg, "Hires CFG Scale", api="hr_cfg"),
                 PasteField(hr_distilled_cfg, "Hires Distilled CFG Scale", api="hr_distilled_cfg"),
                 PasteField(hr_prompts_container, lambda d: gr.update(visible=True) if d.get("Hires prompt", "") != "" or d.get("Hires negative prompt", "") != "" else gr.skip()),
-                PasteField(hr_iterations, "HiRes Iterations", api="hr_iterations"),
-                PasteField(hr_iter_target_steps, "HiRes Iter Target Steps", api="hr_iter_target_steps"),
-                PasteField(hr_iter_target_denoise, "HiRes Iter Target Denoise", api="hr_iter_target_denoise"),
-                PasteField(hr_iter_target_cfg, "HiRes Iter Target CFG", api="hr_iter_target_cfg"),
                 *scripts.scripts_txt2img.infotext_fields,
             ]
             parameters_copypaste.add_paste_fields("txt2img", None, txt2img_paste_fields, override_settings)
@@ -676,9 +638,8 @@ def create_ui():
 
                     elif category == "cfg":
                         with gr.Row():
-                            distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=30.0, step=0.1, label="Distilled CFG Scale", value=3.5, elem_id="img2img_distilled_cfg_scale", scale=4)
-                            cfg_scale = gr.Slider(minimum=minimum_cfg, maximum=30.0, step=0.1, label="CFG Scale", value=7.0, elem_id="img2img_cfg_scale", scale=4)
-                            setattr(cfg_scale, "do_not_save_fields", ["minimum"])
+                            distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=24.0, step=0.5, label="Distilled CFG Scale", value=3.0, elem_id="img2img_distilled_cfg_scale", scale=4)
+                            cfg_scale = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="CFG Scale", value=6.0, elem_id="img2img_cfg_scale", scale=4)
                             image_cfg_scale = gr.Slider(minimum=0, maximum=3.0, step=0.05, label="Image CFG Scale", value=1.5, elem_id="img2img_image_cfg_scale", visible=False)
                             cfg_scale.change(fn=use_cfg, inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
                             scripts.scripts_img2img.setup_ui_for_section(category)
