@@ -7,7 +7,7 @@ from backend.modules.k_prediction import k_prediction_from_diffusers_scheduler
 
 
 class KModel(torch.nn.Module):
-    def __init__(self, model: torch.nn.Module, diffusers_scheduler, k_predictor=None, config=None):
+    def __init__(self, model: torch.nn.Module, diffusers_scheduler, config, k_predictor):
         super().__init__()
 
         self.config = config
@@ -31,7 +31,7 @@ class KModel(torch.nn.Module):
         self.diffusion_model.eval()
         self.diffusion_model.requires_grad_(False)
 
-        if k_predictor is None:
+        if diffusers_scheduler is not None:
             self.predictor = k_prediction_from_diffusers_scheduler(diffusers_scheduler)
         else:
             self.predictor = k_predictor

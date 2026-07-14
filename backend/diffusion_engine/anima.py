@@ -2,12 +2,13 @@ import torch
 from huggingface_guess import model_list
 
 from backend import memory_management
+from backend.args import dynamic_args
 from backend.diffusion_engine.base import ForgeDiffusionEngine, ForgeObjects
-from backend.modules.k_prediction import PredictionDiscreteFlow
 from backend.patcher.clip import CLIP
 from backend.patcher.unet import UnetPatcher
 from backend.patcher.vae import VAE
 from backend.text_processing.anima_engine import AnimaTextProcessingEngine
+from modules.shared import opts
 
 
 class Anima(ForgeDiffusionEngine):
@@ -20,7 +21,7 @@ class Anima(ForgeDiffusionEngine):
 
         vae = VAE(model=huggingface_components["vae"], is_wan=True)
 
-        k_predictor = PredictionDiscreteFlow(estimated_config)
+        k_predictor = self._get_predictor()
 
         unet = UnetPatcher.from_model(model=huggingface_components["transformer"], diffusers_scheduler=None, k_predictor=k_predictor, config=estimated_config)
 
@@ -57,6 +58,10 @@ class Anima(ForgeDiffusionEngine):
             sample = self.forge_objects.vae.encode(y.movedim(1, -1) * 0.5 + 0.5)
             sample = self.forge_objects.vae.first_stage_model.process_in(sample)
             samples.append(sample)
+            if opts.anima_do_reference:
+                dynamic_args.ref_latents = [sample.cpu()]
+            else:
+                dynamic_args.ref_latents.clear()
 
         return torch.cat(samples).to(x)
 

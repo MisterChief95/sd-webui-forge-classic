@@ -12,7 +12,7 @@ except ImportError:
 
 class UnetPatcher(ModelPatcher):
     @classmethod
-    def from_model(cls, model, diffusers_scheduler, config, k_predictor=None):
+    def from_model(cls, model, diffusers_scheduler, config, *, k_predictor=None):
         model = KModel(model=model, diffusers_scheduler=diffusers_scheduler, k_predictor=k_predictor, config=config)
         if isinstance(model.diffusion_model, NunchakuModelMixin):
             return NunchakuPatcher(model, load_device=model.diffusion_model.load_device, offload_device=model.diffusion_model.offload_device, current_device=model.diffusion_model.initial_device)
