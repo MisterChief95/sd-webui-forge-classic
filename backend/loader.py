@@ -429,18 +429,13 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
             state_dict_dtype = utils.weight_dtype(state_dict)
             quant_config = detect_quantization(state_dict, is_unet=True)
 
-            try_int8: bool = False
-
             override_dtype = backend.args.dynamic_args.forge_unet_storage_dtype
-            if override_dtype is torch.int8:
-                override_dtype = torch.bfloat16 if memory_management.should_use_bf16(load_device) else None
-                try_int8 = True
 
             if guess.nunchaku:
                 storage_dtype = torch.bfloat16
                 logger.info(f"Using Nunchaku Model Data Type: {storage_dtype}")
             elif quant_config is not None:
-                storage_dtype = state_dict_dtype
+                storage_dtype = torch.bfloat16
                 logger.info("Using MixedPrecision for Model")
             elif state_dict_dtype in [torch.float8_e4m3fn, torch.float8_e5m2, "nf4", "fp4", "gguf"]:
                 storage_dtype = state_dict_dtype
@@ -478,11 +473,8 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 need_manual_cast = storage_dtype != computation_dtype
                 to_args = dict(device=initial_device, dtype=storage_dtype)
 
-                if try_int8:  # int8 matmul
-                    extra_dtype = str(guess.__class__.__name__)
-                elif quant_config is not None:
+                if quant_config is not None:
                     extra_dtype = quant_config
-                    to_args.clear()
                 else:
                     extra_dtype = None
 

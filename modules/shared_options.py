@@ -176,6 +176,7 @@ options_templates.update(
             "dump_stacks_on_signal": OptionInfo(False, "Print the stack trace before terminating the webui via Ctrl + C"),
             "confirm_leave": OptionInfo(False, "Show a browser confirmation before leaving the page"),
             "no_spellcheck": OptionInfo(False, "Disable auto-correct / spellcheck for prompt fields").needs_reload_ui(),
+            "keep_alive": OptionInfo(False, "Keep generating even when the WebUI browser tab is not in focus").info('for "Generate forever"').needs_reload_ui(),
             "undo_redo": OptionInfo(False, "Enable undo / redo history for prompt fields").needs_reload_ui(),
         },
     )
@@ -370,18 +371,8 @@ options_templates.update(
         ("refiner", "Refiner", "sd"),
         {
             "show_refiner": OptionInfo(False, "Display the Refiner Accordion").info("Refiner swaps the model in the middle of generation; useful for Wan 2.2 <b>High Noise</b> to <b>Low Noise</b> switching").needs_reload_ui(),
-            "refiner_fast_sd": OptionInfo(False, 'Reload "state_dict" Only').info("EXPERIMENTAL"),
+            "refiner_fast_sd": OptionInfo(False, 'Reload "state_dict" Only').info("EXPERIMENTAL").needs_reload_ui(),
             "refiner_use_steps": OptionInfo(False, 'Switch based on "steps" instead').info('by default, Refiner swaps the model based on "sigmas" to match <a href="https://www.reddit.com/r/StableDiffusion/comments/1n3qns1/wan_22_how_many_highsteps_are_needed_a_simple/">Wan 2.2</a> \'s behavior'),
-            "refiner_lora_replacement": OptionInfo(
-                "high_noise=low_noise",
-                "Lora Replacements",
-                gr.Textbox,
-                {"lines": 3, "max_lines": 12, "placeholder": "high_noise=low_noise"},
-            ),
-            "refiner_lora_explanation": OptionHTML("""
-Use the "Lora Replacements" to load different LoRAs between the normal pass and the refiner pass.<br>
-Separate the original and the target with an equal sign; Place each entry in its own line.
-                """),
         },
     )
 )

@@ -38,13 +38,14 @@ class CFGDenoiser(torch.nn.Module):
 
     def __init__(self, sampler):
         super().__init__()
+
         self.model_wrap = None
         self.mask = None
         self.nmask = None
         self.init_latent = None
+
         self.steps = None
         """number of steps as specified by user in UI"""
-
         self.total_steps = None
         """expected number of calls to denoiser calculated from self.steps and specifics of the selected sampler"""
 
@@ -55,13 +56,9 @@ class CFGDenoiser(torch.nn.Module):
         self.sampler = sampler
         self.p = None
 
-        self.need_last_noise_uncond = False
-        self.last_noise_uncond = None
-
-        # Backward Compatibility
-        self.mask_before_denoising = False
-
         self.classic_ddim_eps_estimation = False
+
+        self._refiner_pass = False
 
     @property
     def inner_model(self):
@@ -117,6 +114,7 @@ class CFGDenoiser(torch.nn.Module):
         if sd_samplers_common.apply_refiner(self, x, sigma[0]):
             cond = self.sampler.sampler_extra_args["cond"]
             uncond = self.sampler.sampler_extra_args["uncond"]
+            self._refiner_pass = True
 
         cond_composition, cond = prompt_parser.reconstruct_multicond_batch(cond, self.step)
         uncond = prompt_parser.reconstruct_cond_batch(uncond, self.step) if uncond is not None else None
@@ -135,9 +133,10 @@ class CFGDenoiser(torch.nn.Module):
         denoiser_params = CFGDenoiserParams(x, image_cond, sigma, state.sampling_step, state.sampling_steps, cond, uncond, self)
         cfg_denoiser_callback(denoiser_params)
 
-        # NGMS
         if self.p.is_hr_pass == True:
             cond_scale = self.p.hr_cfg
+        if self._refiner_pass:
+            cond_scale = self.p.refiner_cfg or cond_scale
 
         if 0 < self.step / self.total_steps <= opts.skip_early_cond:
             cond_scale = 1.0
@@ -151,9 +150,6 @@ class CFGDenoiser(torch.nn.Module):
         extra_model_options = kwargs.get("model_options", {})
         denoised, cond_pred, uncond_pred = sampling_function(self, denoiser_params=denoiser_params, cond_scale=cond_scale, cond_composition=cond_composition, extra_model_options=extra_model_options)
 
-        if self.need_last_noise_uncond:
-            self.last_noise_uncond = (x - uncond_pred) / sigma[:, None, None, None]
-
         if self.mask is not None:
             blended_latent = denoised * self.nmask + self.init_latent * self.mask
 
@@ -166,12 +162,11 @@ class CFGDenoiser(torch.nn.Module):
 
             denoised = blended_latent
 
-        preview = self.sampler.last_latent = denoised
-        sd_samplers_common.store_latent(preview)
-
         after_cfg_callback_params = AfterCFGCallbackParams(denoised, state.sampling_step, state.sampling_steps)
         cfg_after_cfg_callback(after_cfg_callback_params)
         denoised = after_cfg_callback_params.x
+
+        sd_samplers_common.store_latent(denoised.detach().clone())
 
         self.step += 1
 

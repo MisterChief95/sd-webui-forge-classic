@@ -18,8 +18,6 @@ class KModel(torch.nn.Module):
         _store = f"storage: {self.storage_dtype}"
         _compute = f"computation: {self.computation_dtype}"
 
-        if args.dynamic_args.ops.endswith("Int8"):
-            _compute += f" + {torch.int8}"
         if args.dynamic_args.ops.endswith("FP8"):
             _compute += f" + {torch.float8_e4m3fn}"
         if args.dynamic_args.ops.startswith("Mixed"):
