@@ -241,13 +241,6 @@ else:
     else:
         FLASH_IS_AVAILABLE = True
 
-try:
-    import bitsandbytes  # noqa: F401
-except Exception:
-    BNB_IS_AVAILABLE = False
-else:
-    BNB_IS_AVAILABLE = True
-
 
 def amd_min_version(device: torch.device = None, min_rdna_version: int = 0) -> bool:
     if not is_amd():
@@ -468,7 +461,7 @@ class LoadedModel:
         return self.model.model_size() - self.model.loaded_size()
 
     def model_memory_required(self, device):
-        if device == self.model.current_loaded_device():
+        if device == self.model.current_device:
             return self.model_offloaded_memory()
         else:
             return self.model_memory()
@@ -1008,7 +1001,7 @@ def cast_to(weight: torch.nn.Parameter, dtype: torch.dtype = None, device: torch
         with context or nullcontext():
             return weight.to(dtype=dtype, copy=copy)
 
-    if type(weight) not in (torch.Tensor, torch.nn.Parameter, QuantizedTensor):  # GGUF / BnB
+    if type(weight) not in (torch.Tensor, torch.nn.Parameter, QuantizedTensor):  # GGUF
         with context or nullcontext():
             return weight.to(dtype=dtype, device=device, non_blocking=non_blocking, copy=copy)
 
@@ -1057,10 +1050,6 @@ def flash_enabled() -> bool:
     if not is_nvidia():
         return False
     return FLASH_IS_AVAILABLE
-
-
-def bnb_enabled() -> bool:
-    return BNB_IS_AVAILABLE
 
 
 def pytorch_attention_enabled() -> bool:

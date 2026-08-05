@@ -44,11 +44,14 @@ class Flux2(ForgeDiffusionEngine):
         memory_management.load_model_gpu(self.forge_objects.clip.patcher)
 
         if not prompt.is_negative_prompt:
-            _references = [*self.ref_latents]
-            if self.ini_latent is not None:
-                _references.insert(0, self.ini_latent)
-                self.ini_latent = None
-            dynamic_args.ref_latents = _references.copy()
+            if opts.klein_no_reference:
+                dynamic_args.ref_latents.clear()
+            else:
+                _references = [*self.ref_latents]
+                if self.ini_latent is not None:
+                    _references.insert(0, self.ini_latent)
+                    self.ini_latent = None
+                dynamic_args.ref_latents = _references.copy()
 
         return self.text_processing_engine_gemma(prompt)
 
@@ -58,22 +61,14 @@ class Flux2(ForgeDiffusionEngine):
         return token_count, max(999, token_count)
 
     @torch.inference_mode()
-    def encode_first_stage(self, x):
-        sample = self.forge_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5)
-        sample = self.forge_objects.vae.first_stage_model.process_in(sample)
+    def encode_first_stage(self, x: torch.Tensor):
+        samples: torch.Tensor = super().encode_first_stage(x)
 
-        if opts.klein_no_reference:
-            return sample.to(x)
+        if not opts.klein_no_reference:
+            sample = samples[0].detach().clone().unsqueeze(0).cpu()
+            if dynamic_args.is_referencing:
+                self.ref_latents.append(sample)
+            else:
+                self.ini_latent = sample
 
-        if dynamic_args.is_referencing:
-            self.ref_latents.append(sample.cpu())
-        else:
-            self.ini_latent = sample.cpu()
-
-        return sample.to(x)
-
-    @torch.inference_mode()
-    def decode_first_stage(self, x):
-        sample = self.forge_objects.vae.first_stage_model.process_out(x)
-        sample = self.forge_objects.vae.decode(sample).movedim(-1, 1) * 2.0 - 1.0
-        return sample.to(x)
+        return samples

@@ -86,20 +86,14 @@ class Flux(ForgeDiffusionEngine):
         return token_count, max(255, token_count)
 
     @torch.inference_mode()
-    def encode_first_stage(self, x):
-        sample = self.forge_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5)
-        sample = self.forge_objects.vae.first_stage_model.process_in(sample)
+    def encode_first_stage(self, x: torch.Tensor):
+        samples: torch.Tensor = super().encode_first_stage(x)
 
         if dynamic_args.kontext:
+            sample = samples[0].detach().clone().unsqueeze(0).cpu()
             if dynamic_args.is_referencing:
-                self.ref_latents.append(sample.cpu())
+                self.ref_latents.append(sample)
             else:
-                self.ini_latent = sample.cpu()
+                self.ini_latent = sample
 
-        return sample.to(x)
-
-    @torch.inference_mode()
-    def decode_first_stage(self, x):
-        sample = self.forge_objects.vae.first_stage_model.process_out(x)
-        sample = self.forge_objects.vae.decode(sample).movedim(-1, 1) * 2.0 - 1.0
-        return sample.to(x)
+        return samples

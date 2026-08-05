@@ -1,3 +1,8 @@
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from modules.prompt_parser import SdConditioning
+
 import torch
 from huggingface_guess import model_list
 
@@ -39,8 +44,19 @@ class Anima(ForgeDiffusionEngine):
         self.use_shift = True
 
     @torch.inference_mode()
-    def get_learned_conditioning(self, prompt: list[str]):
+    def get_learned_conditioning(self, prompt: "SdConditioning"):
         memory_management.load_model_gpu(self.forge_objects.clip.patcher)
+
+        if not prompt.is_negative_prompt:
+            if not opts.anima_do_reference:
+                dynamic_args.ref_latents.clear()
+            else:
+                _references = [*self.ref_latents]
+                if self.ini_latent is not None:
+                    _references.insert(0, self.ini_latent)
+                    self.ini_latent = None
+                dynamic_args.ref_latents = _references.copy()
+
         return self.text_processing_engine_anima(prompt)
 
     @torch.inference_mode()
@@ -50,29 +66,13 @@ class Anima(ForgeDiffusionEngine):
 
     @torch.inference_mode()
     def encode_first_stage(self, x: torch.Tensor):
-        samples: list[torch.Tensor] = []
-        batch: int = x.size(0)
+        samples: torch.Tensor = super().encode_first_stage(x)
 
-        for b in range(batch):
-            y = x[b].unsqueeze(0)
-            sample = self.forge_objects.vae.encode(y.movedim(1, -1) * 0.5 + 0.5)
-            sample = self.forge_objects.vae.first_stage_model.process_in(sample)
-            samples.append(sample)
-            if opts.anima_do_reference:
-                dynamic_args.ref_latents = [sample.cpu()]
+        if opts.anima_do_reference:
+            sample = samples[0].detach().clone().unsqueeze(0).cpu()
+            if dynamic_args.is_referencing:
+                self.ref_latents.append(sample)
+            else:
+                self.ini_latent = sample
 
-        return torch.cat(samples).to(x)
-
-    @torch.inference_mode()
-    def decode_first_stage(self, x: torch.Tensor):
-        samples: list[torch.Tensor] = []
-        batch: int = x.size(0)
-
-        for b in range(batch):
-            y = x[b].unsqueeze(0)
-            sample = self.forge_objects.vae.first_stage_model.process_out(y)
-            sample = self.forge_objects.vae.decode(sample).movedim(-1, 2) * 2.0 - 1.0
-            samples.append(sample)
-
-        dynamic_args.ref_latents.clear()
-        return torch.cat(samples).to(x)
+        return samples

@@ -2,13 +2,12 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import torch
-
     from backend.patcher.clip import CLIP
     from backend.patcher.unet import UnetPatcher
     from backend.patcher.vae import VAE
     from modules_forge.packages.huggingface_guess.model_list import BASE
 
+import torch
 from safetensors.torch import save_file
 
 from backend import memory_management, utils
@@ -41,7 +40,12 @@ class ForgeDiffusionEngine:
 
         self.current_lora_hash = str([])
 
-        self.fix_for_webui_backward_compatibility()
+        self.tiling_enabled = False
+        self.use_distilled_cfg_scale = False
+        self.use_shift = False
+        self.is_sd1 = False
+        self.is_sdxl = False
+        self.is_wan = False  # affects the usage of WanVAE (B, C, T, H, W)
 
         self.ini_latent: "torch.Tensor" = None  # image from img2img input
         self.ref_latents: list["torch.Tensor"] = []  # images from ImageStitch
@@ -62,27 +66,33 @@ class ForgeDiffusionEngine:
     def get_learned_conditioning(self, prompt: list[str]):
         raise NotImplementedError
 
-    @abstractmethod
-    def encode_first_stage(self, x):
-        raise NotImplementedError
+    @torch.inference_mode()
+    def encode_first_stage(self, x: torch.Tensor):
+        if self.is_wan:  # otherwise image batch turns into video...
+            samples: list[torch.Tensor] = []
+            for i in range(x.size(0)):
+                start_image = x[i : i + 1].movedim(1, -1).mul(0.5).add(0.5)
+                sample = self.forge_objects.vae.encode(start_image)
+                sample = self.forge_objects.vae.first_stage_model.process_in(sample)
+                samples.append(sample)
+            return torch.cat(samples, dim=0).to(x)
+        else:
+            start_image = x.movedim(1, -1).mul(0.5).add(0.5)
+            sample = self.forge_objects.vae.encode(start_image)
+            sample = self.forge_objects.vae.first_stage_model.process_in(sample)
+            return sample.to(x)
 
-    @abstractmethod
-    def decode_first_stage(self, x):
-        raise NotImplementedError
+    @torch.inference_mode()
+    def decode_first_stage(self, x: torch.Tensor):
+        sample = self.forge_objects.vae.first_stage_model.process_out(x)
+        sample = self.forge_objects.vae.decode(sample).movedim(-1, (2 if self.is_wan else 1)).mul_(2.0).sub_(1.0)
+        return sample.to(x)
 
     def get_prompt_lengths_on_ui(self, prompt):
         return 0, 75
 
     def is_webui_legacy_model(self):
         return self.is_sd1 or self.is_sdxl
-
-    def fix_for_webui_backward_compatibility(self):
-        self.tiling_enabled = False
-        self.use_distilled_cfg_scale = False
-        self.use_shift = False
-        self.is_sd1 = False
-        self.is_sdxl = False
-        self.is_wan = False  # affects the usage of WanVAE (B, C, T, H, W)
 
     @property
     def first_stage_model(self):

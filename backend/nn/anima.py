@@ -8,7 +8,6 @@
 import math
 from typing import Callable, Optional
 
-import comfy_kitchen as ck
 import torch
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
@@ -23,8 +22,8 @@ from backend.operations import (
     scaled_dot_product_attention,
     weights_manual_cast,
 )
+from backend.quant_ops import ck
 from backend.utils import pad_to_patch_size
-from modules.shared import opts
 
 # region DiT
 
@@ -469,8 +468,7 @@ class Anima(nn.Module):
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor, context: torch.Tensor, padding_mask: Optional[torch.Tensor] = None, **kwargs):
         orig_shape = list(x.shape)
 
-        ref_latents: list[torch.Tensor] = dynamic_args.ref_latents if opts.anima_do_reference else []
-        for ref in ref_latents:
+        for ref in dynamic_args.ref_latents:
             if x.shape[0] == 2:  # batch_cond_uncond
                 ref = torch.cat((ref, ref), dim=0)
             x = torch.cat((x, ref.to(x)), dim=2)

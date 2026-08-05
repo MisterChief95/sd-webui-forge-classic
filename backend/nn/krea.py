@@ -1,4 +1,5 @@
 # https://github.com/Comfy-Org/ComfyUI/blob/v0.26.1/comfy/ldm/krea2/model.py
+# https://github.com/lbouaraba/comfyui-krea2edit/blob/main/__init__.py
 
 from typing import Optional
 
@@ -7,10 +8,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from backend.args import dynamic_args
 from backend.attention import attention_function
 from backend.memory_management import cast_to
-from backend.nn.flux import EmbedND, apply_rope, timestep_embedding
+from backend.misc.image_resize import adaptive_resize
+from backend.nn.flux import EmbedND, timestep_embedding
+from backend.quant_ops import ck
 from backend.utils import pad_to_patch_size
+
+
+def _imgids(bs: int, frame: int, h_: int, w_: int, device: torch.device) -> torch.Tensor:
+    ids = torch.zeros(h_, w_, 3, device=device, dtype=torch.float32)
+    ids[..., 0] = frame
+    ids[..., 1] = torch.arange(h_, device=device, dtype=torch.float32)[:, None]
+    ids[..., 2] = torch.arange(w_, device=device, dtype=torch.float32)[None, :]
+    return ids.reshape(1, h_ * w_, 3).repeat(bs, 1, 1)
 
 
 class RMSNorm(nn.Module):
@@ -72,7 +84,7 @@ class Attention(nn.Module):
         v = rearrange(v, "B L (H D) -> B H L D", H=self.kvheads)
         q, k = self.qknorm(q, k)
         if freqs is not None:
-            q, k = apply_rope(q, k, freqs)
+            q, k = ck.apply_rope(q, k, freqs)
         if self.kvheads != self.heads:
             rep = self.heads // self.kvheads
             k = k.repeat_interleave(rep, dim=1)
@@ -224,10 +236,7 @@ class SingleStreamDiT(nn.Module):
         )
 
     def forward(self, x, timesteps, context, attention_mask=None, transformer_options={}, **kwargs):
-        temporal = x.ndim == 5
-        if temporal:
-            b5, c5, t5, h5, w5 = x.shape
-            x = x.reshape(b5 * t5, c5, h5, w5)
+        x = x.squeeze(2)
         bs, c, H_orig, W_orig = x.shape
         patch = self.patch
 
@@ -235,10 +244,25 @@ class SingleStreamDiT(nn.Module):
         H, W = x.shape[-2], x.shape[-1]
         h_, w_ = H // patch, W // patch
 
-        context = self._unpack_context(context.squeeze(1))
+        ref_latents: list[torch.Tensor] = dynamic_args.ref_latents
+
+        if (_edit := bool(ref_latents)) is True:
+            refs = []
+            ref_grids = []
+            for ref in ref_latents:
+                if x.shape[0] == 2:  # batch_cond_uncond
+                    ref = torch.cat((ref, ref), dim=0)
+                if ref.shape != x.shape:
+                    ref = adaptive_resize(ref, W, H, "area", "center")
+                refs.append(pad_to_patch_size(ref.to(x), (patch, patch), padding_mode="replicate"))
+                ref_grids.append((ref.shape[-2] // patch, ref.shape[-1] // patch))
 
         img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
         img = self.first(img)
+
+        if _edit:
+            refs = [rearrange(r, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch) for r in refs]
+            refs = [self.first(r) for r in refs]
 
         t = self.tmlp(timestep_embedding(timesteps, self.tdim).unsqueeze(1).to(img.dtype))
         tvec = self.tproj(t)
@@ -247,15 +271,26 @@ class SingleStreamDiT(nn.Module):
         context = self.txtmlp(context)
 
         txtlen, imglen = context.shape[1], img.shape[1]
-        combined = torch.cat((context, img), dim=1)
+        if _edit:
+            reflen = sum(ref.shape[1] for ref in refs)
+            combined = torch.cat((context, *refs, img), dim=1)
+        else:
+            reflen = 0
+            combined = torch.cat((context, img), dim=1)
 
         device = combined.device
         txtpos = torch.zeros(bs, txtlen, 3, device=device, dtype=torch.float32)
-        imgids = torch.zeros(h_, w_, 3, device=device, dtype=torch.float32)
-        imgids[..., 1] = torch.arange(h_, device=device, dtype=torch.float32)[:, None]
-        imgids[..., 2] = torch.arange(w_, device=device, dtype=torch.float32)[None, :]
-        imgpos = imgids.reshape(1, h_ * w_, 3).repeat(bs, 1, 1)
-        pos = torch.cat((txtpos, imgpos), dim=1)
+
+        if _edit:
+            refids = [_imgids(bs, i + 1, gh, gw, device) for i, (gh, gw) in enumerate(ref_grids)]
+            imgids = _imgids(bs, 0, h_, w_, device)
+            pos = torch.cat((txtpos, *refids, imgids), dim=1)
+        else:
+            imgids = torch.zeros(h_, w_, 3, device=device, dtype=torch.float32)
+            imgids[..., 1] = torch.arange(h_, device=device, dtype=torch.float32)[:, None]
+            imgids[..., 2] = torch.arange(w_, device=device, dtype=torch.float32)[None, :]
+            imgpos = imgids.reshape(1, h_ * w_, 3).repeat(bs, 1, 1)
+            pos = torch.cat((txtpos, imgpos), dim=1)
 
         freqs = self.pe_embedder(pos)
 
@@ -263,15 +298,8 @@ class SingleStreamDiT(nn.Module):
             combined = block(combined, tvec, freqs, None, transformer_options=transformer_options)
 
         final = self.last(combined, t)
-        out = final[:, txtlen : txtlen + imglen, :]
+        out = final[:, txtlen + reflen : txtlen + reflen + imglen, :]
         out = rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_, w=w_, ph=patch, pw=patch, c=self.channels)
         out = out[:, :, :H_orig, :W_orig]
-        if temporal:
-            out = out.reshape(b5, t5, self.channels, H_orig, W_orig).movedim(1, 2)
-        return out
 
-    def _unpack_context(self, context):
-        b, seq, fused = context.shape
-        if fused != self.txtlayers * self.txtdim:
-            raise ValueError(f"Krea2 expects conditioning with {self.txtlayers}x{self.txtdim}={self.txtlayers * self.txtdim} " f"features (a {self.txtlayers}-layer Qwen3-VL stack) but got {fused}. " f"Load the text encoder with CLIPLoader type 'krea2'.")
-        return context.reshape(b, seq, self.txtlayers, self.txtdim)
+        return out.unsqueeze(2)

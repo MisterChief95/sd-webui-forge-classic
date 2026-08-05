@@ -1,5 +1,5 @@
 import torch
-from huggingface_guess import model_list
+from huggingface_guess import latent, model_list
 
 from backend import memory_management
 from backend.args import dynamic_args
@@ -12,7 +12,6 @@ from backend.patcher.unet import UnetPatcher
 from backend.patcher.vae import VAE
 from backend.text_processing.gemma_it_engine import GemmaTextProcessingEngine
 from modules.shared import opts
-from modules_forge.packages.huggingface_guess import latent
 
 
 class PiD(ForgeDiffusionEngine):
@@ -69,16 +68,17 @@ class PiD(ForgeDiffusionEngine):
         _, _, h, w = x.shape
         if h * w < 512 * 512:
             memory_management.logger.warning(f"Input Resolution ({w}x{h}) is too small, this may cause discoloration/artifacts...")
+        if h * w > 2048 * 2048:
+            memory_management.logger.warning(f"Input Resolution ({w}x{h}) is too large, this may cause discoloration/artifacts...")
         step: int = getattr(opts, "res_step", 64)
         h, w = round(h / step) * step, round(w / step) * step
         return torch.nn.functional.interpolate(x, size=(h, w), mode="bilinear")
 
     @torch.inference_mode()
-    def encode_first_stage(self, x):
-        x = self._validate(x)
-        sample = self.forge_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5)
-        sample = self.forge_objects.vae.first_stage_model.process_in(sample)
-        sample = sample.squeeze(2)
+    def encode_first_stage(self, x: torch.Tensor):
+        start_image = self._validate(x[:1]).movedim(1, -1).mul_(0.5).add_(0.5)
+        sample = self.forge_objects.vae.encode(start_image)
+        sample = self.forge_objects.vae.first_stage_model.process_in(sample).squeeze(2)
         dynamic_args.lq_latent[0] = sample.detach().clone()
 
         return sample
