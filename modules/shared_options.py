@@ -252,10 +252,10 @@ options_templates.update(
             ),
             "divmisc": OptionDiv(),
             "qwen_vae_resize": OptionInfo(False, "[Qwen-Image-Edit] Resize input image to 1 megapixel for ref_latent"),
-            "klein_no_reference": OptionInfo(False, "[Klein] Disable Reference").info("disable Edit ; enable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often"),
+            "klein_do_reference": OptionInfo(True, "[Klein] Enable Reference").info("enable Edit ; disable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often"),
             "anima_do_reference": OptionInfo(False, "[Anima] Enable Reference").info("enable Edit ; disable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often").info("requires specfic Edit LoRA"),
             "krea2_do_reference": OptionInfo(False, "[Krea2] Enable Reference").info("enable Edit ; disable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often").info("requires specfic Edit LoRA"),
-            "reference_explanation": OptionHTML("<b>Note:</b> Remember to change the setting before txt2img to clear the reference"),
+            "reference_explanation": OptionHTML("<b>Note:</b> Remember to change the setting before txt2img to clear the references"),
         },
     )
 )
@@ -481,6 +481,7 @@ options_templates.update(
             "add_version_to_infotext": OptionInfo(True, "Add webui version to infotext"),
             "disable_weights_auto_swap": OptionInfo(True, "Ignore the Checkpoint when reading infotext"),
             "disable_modules_auto_swap": OptionInfo(True, "Ignore the VAE / Text Encoder when reading infotext"),
+            "strip_whitespaces": OptionInfo(True, "Remove leading and trailing whitespaces from the prompts"),
             "infotext_skip_pasting": OptionInfo([], "Ignore fields when reading infotext", ui_components.DropdownMulti, lambda: {"choices": shared_items.get_infotext_names()}),
             "infotext_styles": OptionInfo("Apply if any", "Infer Styles when reading infotext", gr.Radio, {"choices": ("Ignore", "Apply", "Apply if any", "Discard")}).html("""
 <ul style='margin-left: 1.5em'>

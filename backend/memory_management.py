@@ -195,14 +195,14 @@ try:
 except Exception:
     pass
 
-OOM_EXCEPTION = getattr(torch, "OutOfMemoryError", Exception)
-ACCELERATOR_ERROR = getattr(torch, "AcceleratorError", RuntimeError)
+OOM_EXCEPTION = getattr(torch, "OutOfMemoryError", None)
+ACCELERATOR_ERROR = getattr(torch, "AcceleratorError", None)
 
 
 def is_oom(e: Exception) -> bool:
-    if isinstance(e, OOM_EXCEPTION):
+    if OOM_EXCEPTION is not None and isinstance(e, OOM_EXCEPTION):
         return True
-    if isinstance(e, ACCELERATOR_ERROR) or "out of memory" in str(e).lower():
+    if (ACCELERATOR_ERROR is not None and isinstance(e, ACCELERATOR_ERROR)) or "out of memory" in str(e).lower():
         discard_cuda_async_error()
         return True
     return False
@@ -295,17 +295,27 @@ if is_amd():
         except Exception:
             rocm_version = (6, -1)
 
+        def aotriton_supported() -> bool:
+            try:
+                if not torch.backends.cuda.is_flash_attention_available():
+                    return False
+                q = torch.empty((1, 1, 8, 64), dtype=torch.float16, device=get_torch_device())
+                params = torch.backends.cuda.SDPAParams(q, q, q, None, 0.0, False, False)
+                return torch.backends.cuda.can_use_flash_attention(params, False)
+            except Exception:
+                return False
+
         logger.info("AMD Arch: {}".format(arch))
         logger.info("ROCm Version: {}".format(rocm_version))
-        if importlib.util.find_spec("triton") is not None:
+        if aotriton_supported():
             if torch_version_numeric >= (2, 7):
-                if any((a in arch) for a in ["gfx90a", "gfx942", "gfx1100", "gfx1101", "gfx1151"]):
+                if any((a in arch) for a in ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1101", "gfx1150", "gfx1151", "gfx1170"]):
                     ENABLE_PYTORCH_ATTENTION = True
             if rocm_version >= (7, 0):
-                if any((a in arch) for a in ["gfx1201"]):
+                if any((a in arch) for a in ["gfx1200", "gfx1201"]):
                     ENABLE_PYTORCH_ATTENTION = True
         if torch_version_numeric >= (2, 7) and rocm_version >= (6, 4):
-            if any((a in arch) for a in ["gfx1200", "gfx1201", "gfx950"]):
+            if any((a in arch) for a in ["gfx1200", "gfx1201", "gfx950", "gfx1170"]):
                 SUPPORT_FP8_OPS = True
 
     except Exception:
