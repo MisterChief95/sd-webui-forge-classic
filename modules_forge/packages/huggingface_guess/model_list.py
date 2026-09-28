@@ -104,7 +104,6 @@ class SD15(BASE):
         "model_channels": 320,
         "use_linear_in_transformer": False,
         "adm_in_channels": None,
-        "use_temporal_attention": False,
     }
 
     unet_extra_config = {
@@ -158,7 +157,6 @@ class SDXLRefiner(BASE):
         "context_dim": 1280,
         "adm_in_channels": 2560,
         "transformer_depth": [0, 0, 4, 4, 4, 4, 0, 0],
-        "use_temporal_attention": False,
     }
 
     latent_format = latent.SDXL
@@ -193,7 +191,6 @@ class SDXL(BASE):
         "transformer_depth": [0, 0, 2, 2, 10, 10],
         "context_dim": 2048,
         "adm_in_channels": 2816,
-        "use_temporal_attention": False,
     }
 
     latent_format = latent.SDXL

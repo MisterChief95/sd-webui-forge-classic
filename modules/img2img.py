@@ -24,7 +24,7 @@ from modules.ui import _STEP, plaintext_to_html, sRound
 from modules_forge import main_thread
 
 
-def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, scale_by=1.0, use_png_info=False, png_info_props=None, png_info_dir=None):
+def process_batch(p: StableDiffusionProcessingImg2Img, input, output_dir, inpaint_mask_dir, args, to_scale=False, scale_by=1.0, use_png_info=False, png_info_props=None, png_info_dir=None):
     output_dir = output_dir.strip()
     processing.fix_seed(p)
 
@@ -52,6 +52,8 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
     cfg_scale = p.cfg_scale
     sampler_name = p.sampler_name
     steps = p.steps
+    width = p.width
+    height = p.height
     override_settings = p.override_settings
     sd_model_checkpoint_override = get_closet_checkpoint_match(override_settings.get("sd_model_checkpoint", None))
     batch_results = None
@@ -75,9 +77,12 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
         if to_scale:
             p.width = sRound(img.width * scale_by)
             p.height = sRound(img.height * scale_by)
+        else:
+            p.width = width
+            p.height = height
 
         _w, _h = img.size
-        if not (_w % _STEP == 0 and _h % _STEP == 0):
+        if p.resize_mode < 4 and not (_w % _STEP == 0 and _h % _STEP == 0):
             img = images.resize_image(1, img, sRound(_w), sRound(_h))
 
         p.init_images = [img] * p.batch_size
@@ -214,6 +219,7 @@ def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, 
 
     if selected_scale_tab == 1 and not is_batch:
         assert image, 'Failed to "Resize by" because no input image is provided'
+        assert resize_mode < 4, '"Preserve Aspect Ratio" does not support "Resize by"'
         if mode in (2, 3, 4):
             assert not inpaint_full_res, '"Only masked" does not support "Resize by"'
 

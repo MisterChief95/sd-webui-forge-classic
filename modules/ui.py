@@ -157,9 +157,11 @@ def update_token_counter(text, steps, styles, *, is_positive=True):
         assert get_prompt_lengths_on_ui is not None
     except Exception:
         return f"<span class='gr-box gr-text-input'>?/?</span>"
+    else:
+        from backend.text_processing.parsing import strip_emphasis
 
     flat_prompts = reduce(lambda list1, list2: list1 + list2, prompt_schedules)
-    prompts = [prompt_parser.strip_emphasis(prompt_text) for _, prompt_text in flat_prompts]
+    prompts = [strip_emphasis(prompt_text) for _, prompt_text in flat_prompts]
     token_count, max_length = max([get_prompt_lengths_on_ui(prompt) for prompt in prompts], key=lambda args: args[0])
     return f"<span class='gr-box gr-text-input'>{token_count}/{max_length}</span>"
 
@@ -581,7 +583,7 @@ def create_ui():
                             )
 
                         with FormRow():
-                            resize_mode = gr.Radio(label="Resize mode", elem_id="resize_mode", choices=["Just resize", "Crop and resize", "Resize and fill", "Just resize (latent upscale)"], type="index", value="Crop and resize")
+                            resize_mode = gr.Radio(label="Resize Mode", elem_id="resize_mode", choices=["Just Resize", "Crop and Resize", "Resize and Fill", "Latent Upscale", "Preserve Aspect Ratio"], type="index", value=1)
 
                     elif category == "dimensions":
                         with FormRow():

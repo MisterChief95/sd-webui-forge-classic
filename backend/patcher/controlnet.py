@@ -423,9 +423,7 @@ class ControlLora(ControlNet):
         controlnet_config["hint_channels"] = self.control_weights["input_hint_block.0.weight"].shape[1]
         controlnet_config["hint_width"] = self.control_weights["input_hint_block.0.weight"].shape[0]
 
-        dtype = model.storage_dtype
-
-        if dtype in ["nf4", "fp4", "gguf"]:
+        if (dtype := model.storage_dtype) == "gguf":
             dtype = torch.float16
 
         controlnet_config["dtype"] = dtype

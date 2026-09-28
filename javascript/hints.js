@@ -15,9 +15,11 @@ const titles = {
 
     "Seed": 'Given the same prompts and parameters, you "should" generate the same image if the Seed is also the same',
 
-    "Just resize": "Resize input image directly to target resolution",
-    "Crop and resize": "Resize the image while maintaining the aspect ratio; crop the excessive parts",
-    "Resize and fill": "Resize the image while maintaining the aspect ratio; fill the empty parts with neighboring colors",
+    "Just Resize": "Resize the input image directly to the target resolution",
+    "Crop and Resize": "Resize the image while maintaining the aspect ratio: Crop the excessive parts",
+    "Resize and Fill": "Resize the image while maintaining the aspect ratio: Fill the empty parts with neighboring colors",
+    "Latent Upscale": 'Same as "Just Resize" but resize the input latent instead of the input image',
+    "Preserve Aspect Ratio": "Resize the image while maintaining the aspect ratio; Scale the short-side using the same ratio as the long-side",
 
     "Mask blur": "How much feathering to apply to the mask (in pixels)",
     "fill": "Fill the masked areas with neighboring colors",

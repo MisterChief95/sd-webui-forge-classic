@@ -1788,6 +1788,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
             if crop_region is None and self.resize_mode != 3:  # Whole picture / img2img
                 image = images.resize_image(self.resize_mode, image, self.width, self.height)
+                self.width, self.height = image.size
 
             if image_mask is not None:
                 _scales = tuple(y / x for y, x in zip(_image_size, _orig_size))

@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from backend.args import dynamic_args
+from backend.misc.image_resize import adaptive_resize
 from backend.state_dict import load_state_dict
 
 logger = logging.getLogger("ControlNet")
@@ -266,6 +268,9 @@ class ControlNetLLLiteDiT(nn.Module):
             m.layer_idx = i
             m._depth_embeds_ref = [self.depth_embeds]
 
+        self._cond_image_original: torch.Tensor = None
+        self._lllite_tiled_cache: dict[tuple, dict[int, torch.Tensor]] = {}
+
         logger.info(f"Loaded Control-LLLite (Anima) ({n} modules)")
 
     @staticmethod
@@ -316,10 +321,73 @@ class ControlNetLLLiteDiT(nn.Module):
         if cond_image is None:
             for m in self.lllite_modules:
                 m.cond_emb = None
+            self._cond_image_original = None
+            self._lllite_tiled_cache.clear()
             return
+        self._cond_image_original = cond_image.clone()
+        self._lllite_tiled_cache.clear()
         cx = self.conditioning1(cond_image)
         for m in self.lllite_modules:
             m.cond_emb = cx
+
+    def prepare_tiled(self, bboxes, opt_f: int, PH: int, PW: int, batch_size: int, batch_id: int, x_dtype: torch.dtype, tuple_key: tuple):
+        if self._cond_image_original is None:
+            return
+
+        if batch_id in (cache_for_key := self._lllite_tiled_cache.get(tuple_key, {})):
+            for m in self.lllite_modules:
+                m.cond_emb = cache_for_key[batch_id]
+            return
+
+        cond = self._cond_image_original
+
+        if cond.shape[-2] != PH or cond.shape[-1] != PW:
+            resized = adaptive_resize(cond.float(), PW, PH, "nearest-exact", "center").to(dtype=x_dtype)
+            cond_resized = resized.to(device=cond.device, dtype=x_dtype)
+        else:
+            cond_resized = cond
+
+        if cond_resized.shape[0] < batch_size:
+            B = cond_resized.shape[0]
+            if B == 1:
+                cond_repeat = cond_resized.expand(batch_size, -1, -1, -1)
+            else:
+                n = (batch_size + B - 1) // B
+                cond_repeat = cond_resized.repeat(n, 1, 1, 1)[:batch_size]
+        else:
+            cond_repeat = cond_resized[:batch_size]
+
+        tiles = []
+
+        for bbox in bboxes:
+            x1 = bbox[0] * opt_f
+            x2 = bbox[2] * opt_f
+            y1 = bbox[1] * opt_f
+            y2 = bbox[3] * opt_f
+
+            x1 = max(0, min(x1, cond_repeat.shape[3]))
+            x2 = max(0, min(x2, cond_repeat.shape[3]))
+            y1 = max(0, min(y1, cond_repeat.shape[2]))
+            y2 = max(0, min(y2, cond_repeat.shape[2]))
+
+            tile = cond_repeat[:, :, y1:y2, x1:x2]
+            tiles.append(tile)
+
+        tiled = torch.cat(tiles, dim=0) if len(tiles) > 1 else tiles[0]
+
+        device = self.conditioning1.conv1.weight.device
+        dtype = self.conditioning1.conv1.weight.dtype
+
+        cx_tiled = self.conditioning1(tiled.to(device=device, dtype=dtype))
+
+        _cache = self._lllite_tiled_cache.setdefault(tuple_key, {})
+        _cache[batch_id] = cx_tiled
+
+        for m in self.lllite_modules:
+            m.cond_emb = cx_tiled
+
+    def clear_tiled_cache(self):
+        self._lllite_tiled_cache.clear()
 
     def set_multiplier(self, multiplier: float):
         self.multiplier = multiplier
@@ -341,9 +409,19 @@ class ControlNetLLLiteDiT(nn.Module):
         for m in self.lllite_modules:
             m.apply_to()
 
+        instances: set["ControlNetLLLiteDiT"] = getattr(dynamic_args, "ACTIVE_LLLITE_DIT", set())
+        instances.add(self)
+        setattr(dynamic_args, "ACTIVE_LLLITE_DIT", instances)
+
     def restore(self):
         for m in self.lllite_modules:
             m.restore()
+
+        try:
+            getattr(dynamic_args, "ACTIVE_LLLITE_DIT", None).remove(self)
+        except (AttributeError, KeyError):
+            pass
+
         self.set_cond_image(None)
 
 

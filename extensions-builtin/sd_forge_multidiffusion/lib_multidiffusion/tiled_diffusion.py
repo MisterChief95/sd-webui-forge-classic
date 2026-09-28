@@ -12,6 +12,7 @@ from numpy import exp, pi, sqrt
 from torch import Tensor
 
 from backend import memory_management
+from backend.args import dynamic_args
 from backend.misc.image_resize import adaptive_resize
 from backend.patcher.base import ModelPatcher
 from backend.patcher.controlnet import ControlNet, T2IAdapter
@@ -227,7 +228,7 @@ class AbstractDiffusion:
                 control_tile = torch.cat(all_control_tile, dim=0)
                 self.control_tensor_batch[param_id][batch_id] = control_tile
 
-    def process_controlnet(self, x_shape, x_dtype, c_in: dict, cond_or_uncond: list, bboxes, batch_size: int, batch_id: int):
+    def process_controlnet(self, x_shape: torch.Size, x_dtype: torch.dtype, c_in: dict, cond_or_uncond: list[int], bboxes: list[BBox], batch_size: int, batch_id: int):
         control: ControlNet = c_in["control_model"]
         param_id = -1
         tuple_key = tuple(cond_or_uncond) + tuple(x_shape)
@@ -253,14 +254,6 @@ class AbstractDiffusion:
                     control.cond_hint = adaptive_resize(control.cond_hint_original, width, height, "nearest-exact", "center").float().to(control.device)
                     if control.channels_in == 1 and control.cond_hint.shape[1] > 1:
                         control.cond_hint = torch.mean(control.cond_hint, 1, keepdim=True)
-                elif control.__class__.__name__ == "ControlLLLiteAdvanced":
-                    if control.sub_idxs is not None and control.cond_hint_original.shape[0] >= control.full_latent_length:
-                        control.cond_hint = adaptive_resize(control.cond_hint_original[control.sub_idxs], PW, PH, "nearest-exact", "center").to(dtype=dtype, device=control.device)
-                    else:
-                        if (PH, PW) == (control.cond_hint_original.shape[-2], control.cond_hint_original.shape[-1]):
-                            control.cond_hint = control.cond_hint_original.clone().to(dtype=dtype, device=control.device)
-                        else:
-                            control.cond_hint = adaptive_resize(control.cond_hint_original, PW, PH, "nearest-exact", "center").to(dtype=dtype, device=control.device)
                 else:
                     if (PH, PW) == (control.cond_hint_original.shape[-2], control.cond_hint_original.shape[-1]):
                         control.cond_hint = control.cond_hint_original.clone().to(dtype=dtype, device=control.device)
@@ -275,6 +268,31 @@ class AbstractDiffusion:
             else:
                 control.cond_hint = self.control_params[tuple_key][param_id][batch_id]
             control = control.previous_controlnet
+
+    def process_controllllite(self, x_shape: torch.Size, x_dtype: torch.dtype, c_in: dict, cond_or_uncond: list[int], bboxes: list[BBox], batch_size: int, batch_id: int):
+        PH, PW = self.h * opt_f, self.w * opt_f
+        tuple_key = tuple(cond_or_uncond) + tuple(x_shape)
+
+        if patches_dict := c_in.get("transformer_options", {}).get("patches", {}):  # SDXL
+            seen: set[int] = set()
+
+            for patch in [*patches_dict.get("attn1_patch", []), *patches_dict.get("attn2_patch", [])]:
+                if type(patch).__name__ != "control_net_lllite_patch":
+                    continue
+                if (pid := id(patch)) in seen:
+                    continue
+
+                if self.refresh:
+                    patch.clear_cache()
+                patch.prepare_tiled(bboxes, opt_f, PH, PW, batch_size, batch_id, x_dtype, tuple_key)
+
+                seen.add(pid)
+
+        if active_dits := getattr(dynamic_args, "ACTIVE_LLLITE_DIT", None):  # Anima
+            for instance in active_dits:
+                if self.refresh:
+                    instance.clear_tiled_cache()
+                instance.prepare_tiled(bboxes, opt_f, PH, PW, batch_size, batch_id, x_dtype, tuple_key)
 
 
 def gaussian_weights(tile_w: int, tile_h: int) -> Tensor:
@@ -334,6 +352,8 @@ class MultiDiffusion(AbstractDiffusion):
                 if "control" in c_in:
                     self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
                     c_tile["control"] = c_in["control_model"].get_control(x_tile, ts_tile, c_tile, len(cond_or_uncond))
+
+                self.process_controllllite(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
 
                 if is_5d:
                     x_tile = x_tile.unsqueeze(2)
@@ -446,6 +466,8 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 if "control" in c_in:
                     self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
                     c_tile["control"] = c_in["control_model"].get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
+
+                self.process_controllllite(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
 
                 if is_5d:
                     x_tile = x_tile.unsqueeze(2)

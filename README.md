@@ -116,11 +116,13 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - drastically speed up installation
     - require **manually** installing [uv](https://github.com/astral-sh/uv/releases)
     - see [Commandline](#by-neo)
-- [X] Support [SageAttention](https://github.com/thu-ml/SageAttention), [FlashAttention](https://github.com/Dao-AILab/flash-attention), [ComfyKitchenAttention](https://github.com/Comfy-Org/comfy-kitchen), `fp16_accumulation`, `torch._scaled_mm`
+- [X] Support [SageAttention](https://github.com/thu-ml/SageAttention), [FlashAttention](https://github.com/Dao-AILab/flash-attention), [ComfyKitchenAttention](https://github.com/Comfy-Org/comfy-kitchen), `fp16_accumulation`
     - see [Commandline](#by-neo)
 - [X] Implement [Radial Attention](https://github.com/mit-han-lab/radial-attention)
     - speed up `Wan 2.2`
     - require **manually** installing [SpargeAttn](https://github.com/thu-ml/SpargeAttn)
+- [X] Implement [Sol-Attn](https://arxiv.org/abs/2607.24027)
+    - speed up inference
 - [X] Implement fast `state_dict` switching for Refiner
     - enable in **Settings/Refiner**
 - [X] Implement RescaleCFG
@@ -153,11 +155,16 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Automatically determine the optimal row count for `X/Y/Z Plot`
 - [X] Update **LLLite** Controlnet
     - [SDXL](https://huggingface.co/kohya-ss/controlnet-lllite/tree/main) / [Anima](https://huggingface.co/kohya-ss/Anima-LLLite/tree/main)
+    - support `MultiDiffusion`
 - [X] Support **Union** Controlnet
     - [SDXL](https://huggingface.co/xinsir/controlnet-union-sdxl-1.0) / [Chenkin](https://civitai.com/models/2527960/chenkin-unicontrol-xl)
 - [X] Support **Region** Controlnet
     - [Anima](https://huggingface.co/Sen-sou/Anima-LLLite-Regional-Controlnet)
     - use the **Region** mode to create color masks
+- [X] Implement **LoRA Control**
+    - require **on-the-fly** LoRA
+    - require syntax `<lora:name:[w1@t1, w2@t2, ...]>`
+    - see [comment](https://github.com/Haoming02/sd-webui-forge-classic/issues/1439#issuecomment-5539099537) for example
 
 #### Removed Features
 
@@ -183,6 +190,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Fix memory leak when switching checkpoints
 - [X] Restore the ability to drag-and-drop images onto `gr.Image` that already contains image
 - [X] Speed up launch time
+- [X] Speed up model loading
 - [X] Improve timer logs
 - [X] Remove unused `cmd_args`
 - [X] Remove unused `args_parser`
@@ -285,9 +293,9 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 <br>
 
 - `--uv`: Replace the `python -m pip` calls with `uv pip` to massively speed up package installation
-    - requires **uv** to be installed first *(see [Extra Installations](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Extra-Installations))*
+    - require **uv** to be installed first *(see [Extra Installations](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Extra-Installations))*
 - `--uv-symlink`: Same as above; but additionally pass `--link-mode symlink` to the commands
-    - significantly reduces installation size (`~7 GB` to `~100 MB`)
+    - significantly reduce installation size (`~7 GB` to `~100 MB`)
 - `--uv-local-cache`: Same as above; but additionally set `UV_CACHE_DIR` to a `.uv-cache` folder within WebUI directory
     - speed up installation on non-default drive *(**i.e.** not `C:` on Windows)*
     - allow clean uninstallation by simply deleting the WebUI directory
@@ -341,6 +349,8 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - override other attention packages
 - `--enable-triton-backend`: Enable the use of Triton backend in `comfy-kitchen`
     - *might* speed up inference
+- `--pynvml`: Use the NVIDIA Management Library to determine the actual amount of free VRAM
+    - prevent system freeze when running other programs
 
 <br>
 

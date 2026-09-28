@@ -37,11 +37,11 @@ class ForgeRender:
         return output
 
 
-_DTYPE: list[str] = ["float16", "float32", "bfloat16", "float8_e4m3fn", "float8_e5m2", "int8", "gguf", "nf4", "fp4", "int4", "MixedPrecision"]
-_MODELS: list[str] = ["Gemma2", "Qwen2.5", "Qwen3", "T5XXL", "Model"]
+_DTYPE: list[str] = ["float16", "float32", "bfloat16", "float8_e4m3fn", "float8_e5m2", "int8", "gguf", "MixedPrecision"]
+_MODELS: list[str] = ["Qwen2.5", "Gemma2", "Mistral3", "Qwen3", "T5XXL", "Model"]
 
 KEYWORDS: dict[str, list[str]] = {
-    "attention": ["SageAttention", "FlashAttention", "PyTorch", "xformers", "sage", "flash"],
+    "attention": ["Comfy-Kitchen", "SageAttention", "FlashAttention", "PyTorch", "xformers", "sage", "flash"],
     "loader": _DTYPE + _MODELS,
     "memory_management": ["cpu", "cuda", "rocm", "PyTorch"],
     "lora": ["LORA", "UNet", "CLIP"],
