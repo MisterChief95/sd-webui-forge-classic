@@ -21,6 +21,8 @@ from .quant_ops import (  # noqa
     get_layout_class,
 )
 
+_GROUPED_INT8_FORMATS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+
 
 def _quantized_apply(module: torch.nn.Module, fn, recurse=True):
     if recurse:
@@ -121,10 +123,13 @@ def _load_quantized_module(module: torch.nn.Module, super_load, state_dict: dict
                 "quant_group_size": 64,
                 "linear_dtype": layer_conf.get("linear_dtype", params_conf.get("linear_dtype", "int4")),
             }
-        elif module.quant_format == "asym_w4a8_int8":
+        elif module.quant_format in _GROUPED_INT8_FORMATS:
+            bits = _GROUPED_INT8_FORMATS[module.quant_format]
+            if weight.shape[1] * 8 != module._orig_shape[1] * bits:
+                raise ValueError(f'Invalid Layer "{layer_name}" ([{module.quant_format}] packed weight width {weight.shape[1]} does not match K={module._orig_shape[1]} at {bits} bits)')
             scale = pop_scale("weight_s_rel")
             if scale is None:
-                raise ValueError(f"Missing W4A8 group scale (weight_s_rel) for layer {layer_name}")
+                raise ValueError(f"Missing {module.quant_format} group scale (weight_s_rel) for layer {layer_name}")
             if scale.dtype == torch.uint8:
                 scale = scale.view(torch.float8_e4m3fn)
             params_conf = layer_conf.get("params", {})
@@ -189,6 +194,9 @@ def _quantized_weight_state_dict(module: torch.nn.Module, sd: dict[str, torch.Te
             linear_dtype = getattr(params, "linear_dtype", "int4")
             if linear_dtype != "int4":
                 quant_conf["linear_dtype"] = linear_dtype
+        elif module.quant_format in _GROUPED_INT8_FORMATS:
+            quant_conf["group_size"] = getattr(params, "group_size", 16)
+            quant_conf["convrot_groupsize"] = getattr(params, "convrot_groupsize", 256)
         if extra_quant_conf:
             quant_conf.update(extra_quant_conf)
         sd[f"{prefix}comfy_quant"] = torch.tensor(list(json.dumps(quant_conf).encode("utf-8")), dtype=torch.uint8)
