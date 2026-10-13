@@ -68,6 +68,7 @@ set_vram_to = VRAMState.NORMAL_VRAM
 cpu_state = CPUState.GPU
 
 VAE_ALWAYS_TILED: bool = False
+UNET_ALWAYS_OFFLOAD: bool = False
 
 FLOAT8_TYPES: list[torch.dtype] = []
 
@@ -709,7 +710,7 @@ def load_models_gpu(models: list["ModelPatcher"], memory_required: float = 0, fo
             if lowvram_model_memory == 0:
                 lowvram_model_memory = 0.1
 
-        if vram_set_state is VRAMState.NO_VRAM:
+        if vram_set_state is VRAMState.NO_VRAM or (UNET_ALWAYS_OFFLOAD and type(loaded_model.model).__name__.startswith("Unet")):
             lowvram_model_memory = 0.1
 
         loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
@@ -943,7 +944,7 @@ def vae_offload_device() -> torch.device:
     return get_torch_device() if args.gpu_only else cpu
 
 
-def vae_dtype(device=None, allowed_dtypes=None) -> torch.dtype:
+def vae_dtype(device: torch.device = None, allowed_dtypes: list[torch.dtype] = [torch.bfloat16, torch.float32]) -> torch.dtype:
     if args.fp16_vae:
         return torch.float16
     if args.bf16_vae:
@@ -951,8 +952,11 @@ def vae_dtype(device=None, allowed_dtypes=None) -> torch.dtype:
     if args.fp32_vae:
         return torch.float32
 
-    if should_use_bf16(vae_device()):
-        return torch.bfloat16
+    for d in allowed_dtypes:
+        if d is torch.float16 and should_use_fp16(device or vae_device()):
+            return d
+        if d is torch.bfloat16 and should_use_bf16(device or vae_device()):
+            return d
 
     return torch.float32
 
