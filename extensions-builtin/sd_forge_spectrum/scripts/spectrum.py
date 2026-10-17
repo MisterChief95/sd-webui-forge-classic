@@ -1,8 +1,8 @@
 import gradio as gr
-from lib_spectrum.forecaster import SpectrumNode
+from lib_spectrum import SpectrumNode
 from lib_spectrum.presets import PresetManager
 
-from modules import scripts, shared
+from modules import scripts
 from modules.infotext_utils import PasteField
 from modules.ui_components import InputAccordion
 
@@ -156,10 +156,6 @@ class SpectrumForForge(scripts.Script):
         if not enable:
             return
 
-        if shared.opts.skip_early_cond > 0.0 or shared.opts.s_min_uncond > 0.0:
-            print('Spectrum does not support "Ignore/Skip Negative Prompt" optimizations...')
-            return
-
         base_args = args[:PARAM_COUNT]
         if len(args) >= PARAM_COUNT + 2:
             apply_to_hires = args[PARAM_COUNT]
@@ -178,8 +174,7 @@ class SpectrumForForge(scripts.Script):
         steps = (p.hr_second_pass_steps or p.steps) if is_hr_pass else p.steps
 
         unet = p.sd_model.forge_objects.unet
-        unet = SpectrumNode.patch(unet, steps, *spectrum_args)
-        p.sd_model.forge_objects.unet = unet
+        p.sd_model.forge_objects.unet = SpectrumNode.patch(unet, steps, *spectrum_args)
 
         for k, v in zip(PARAM_KEYS, base_args):
             p.extra_generation_params[k] = v

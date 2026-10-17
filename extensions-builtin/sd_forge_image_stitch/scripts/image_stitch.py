@@ -11,14 +11,16 @@ from modules.sd_samplers_common import images_tensor_to_samples
 from modules.shared import device, opts
 from modules.ui_components import FormRow, InputAccordion
 
-t2i_info = """
-For <b>Flux.1-Kontext</b> / <b>Flux.2-Klein</b> / <b>Qwen-Image-Edit</b> / <b>Anima Edit</b> / <b>Krea2 Edit</b>: Use in <b>txt2img</b> to achieve the effect of empty latent with custom resolution<br>
+_edit = "Flux.1-Kontext, Flux.2-Klein, Qwen-Image-Edit, Qwen-Image-2.1, Anima Edit, Krea2 Edit"
+
+t2i_info = f"""
+For <span title="{_edit}"><b><ins>Edit Models</ins></b></span>: Use in <b>txt2img</b> to achieve the effect of empty latent with custom resolution<br>
 For <b>Wan 2.2 I2V</b>: Use in <b>txt2img</b> to set as the Last Frame to achieve LastFrameToVideo<br>
 <b>Note:</b> This doesn't actually stitch the images ; <b>Tip:</b> Use the "Image to Upload" to paste images
 """
 
-i2i_info = """
-For <b>Flux.1-Kontext</b> / <b>Flux.2-Klein</b> / <b>Qwen-Image-Edit</b> / <b>Anima Edit</b> / <b>Krea2 Edit</b>: Use in <b>img2img</b> to achieve the effect of multiple input images<br>
+i2i_info = f"""
+For <span title="{_edit}"><b><ins>Edit Models</ins></b></span>: Use in <b>img2img</b> to achieve the effect of multiple input images<br>
 For <b>Wan 2.2 I2V</b>: Use in <b>img2img</b> to set as the Last Frame to achieve FirstLastFrameToVideo<br>
 <b>Note:</b> This doesn't actually stitch the images ; <b>Tip:</b> Use the "Image to Upload" to paste images
 """
