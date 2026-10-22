@@ -407,9 +407,15 @@ def _swiglu_eager(x: torch.Tensor) -> torch.Tensor:
     return F.silu(gate).mul_(up)
 
 
+def _situ_eager(x: torch.Tensor) -> torch.Tensor:
+    hidden, gate = x.chunk(2, dim=-1)
+    return (4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate)) * (25.0 * torch.tanh(hidden / 25.0))
+
+
 INPUT_ACT_EAGER = {
     "gelu_tanh": lambda x: F.gelu(x, approximate="tanh"),
     "swiglu": _swiglu_eager,
+    "situ": _situ_eager,
 }
 
 
@@ -438,7 +444,7 @@ def linear_input_act(linear: torch.nn.Linear, x: torch.Tensor, input_act: str, a
     full_precision_mm = getattr(linear, "_full_precision_mm", False)
 
     if not isinstance(weight, QuantizedTensor) or weight._layout_cls != "TensorWiseINT8Layout" or getattr(weight._params, "transposed", False) or full_precision_mm:
-        if not isinstance(weight, QuantizedTensor) and not full_precision_mm and _fp16_linear_wanted(x):
+        if not isinstance(weight, QuantizedTensor) and not full_precision_mm and _fp16_linear_wanted(x) and getattr(weight, "gguf_cls", None) is None:
             weight, bias, offload_stream = weights_manual_cast(linear, x)
             with main_stream_worker(weight, bias, offload_stream):
                 return ck.fp16_linear(_eager_input_act(x, input_act, act_weight, act_eps), weight, bias, residual=residual, residual_scale=residual_scale)

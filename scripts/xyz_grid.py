@@ -14,27 +14,31 @@ import gradio as gr
 import numpy as np
 from PIL import Image
 
-import modules.scripts as scripts
-import modules.sd_models
-import modules.shared as shared
 from backend.logging import setup_logger
 from modules import (
     errors,
     images,
     processing,
-    sd_models,
+    scripts,
     sd_samplers,
     sd_schedulers,
     sd_vae,
+    shared,
 )
 from modules.processing import (
     Processed,
     StableDiffusionProcessing,
     StableDiffusionProcessingTxt2Img,
+    fix_seed,
     process_images,
 )
-from modules.sd_models import model_data, select_checkpoint
-from modules.shared import cmd_opts, opts, state
+from modules.sd_models import (
+    checkpoints_list,
+    get_closet_checkpoint_match,
+    model_data,
+    select_checkpoint,
+)
+from modules.shared import opts
 from modules.ui_components import ToolButton
 
 logger = logging.getLogger("xyz")
@@ -92,20 +96,6 @@ def apply_order(p: StableDiffusionProcessing, x: list[str], _):
     p.prompt = prompt_tmp + p.prompt
 
 
-def apply_checkpoint(p: StableDiffusionProcessing, x: str, _):
-    if (info := modules.sd_models.get_closet_checkpoint_match(x)) is None:
-        raise ValueError(f'Unknown Checkpoint: "{x}"')
-
-    if info.name == p.override_settings.get("sd_model_checkpoint", None):
-        return
-
-    orig_ckpt = getattr(opts, "sd_model_checkpoint", None)
-
-    opts.set("sd_model_checkpoint", info.name)
-    refresh_loading_params_for_xyz_grid()
-    opts.set("sd_model_checkpoint", orig_ckpt)
-
-
 def apply_size(p: StableDiffusionProcessing, x: str, _):
     try:
         width, height = x.split("x")
@@ -115,8 +105,22 @@ def apply_size(p: StableDiffusionProcessing, x: str, _):
         logger.error(f'Invalid Size "{x}" for X/Y/Z Plot')
 
 
-def apply_vae(p: StableDiffusionProcessing, x: str, _):
+def apply_checkpoint(p: StableDiffusionProcessing, x: str, _):
+    p.override_settings["sd_model_checkpoint"] = get_closet_checkpoint_match(x).name
+
+
+def apply_vae_fast(p: StableDiffusionProcessing, x: str, _):
     p.override_settings["sd_vae"] = find_vae(x)
+
+
+def apply_vae(p: StableDiffusionProcessing, x: str, xs: list[str]):
+
+    def to_replace(v: str) -> bool:
+        return any(v.endswith(x) for x in xs)
+
+    modules: list[str] = [m for m in opts.forge_additional_modules if not to_replace(m)]
+
+    p.override_settings["forge_additional_modules"] = modules + [find_vae(x)]
 
 
 def apply_styles(p: StableDiffusionProcessing, x: str, _):
@@ -162,7 +166,7 @@ def confirm_samplers(p: StableDiffusionProcessing, xs: list[str]):
 
 def confirm_checkpoints(p: StableDiffusionProcessing, xs: list[str]):
     for x in xs:
-        if modules.sd_models.get_closet_checkpoint_match(x) is None:
+        if get_closet_checkpoint_match(x) is None:
             raise RuntimeError(f'Unknown Checkpoint: "{x}"')
 
 
@@ -171,7 +175,7 @@ def confirm_checkpoints_or_none(p: StableDiffusionProcessing, xs: list[str]):
         if x in (None, "None", "none", ""):
             continue
 
-        if modules.sd_models.get_closet_checkpoint_match(x) is None:
+        if get_closet_checkpoint_match(x) is None:
             raise RuntimeError(f'Unknown Checkpoint: "{x}"')
 
 
@@ -193,7 +197,7 @@ def refresh_loading_params_for_xyz_grid():
     """
     checkpoint_info = select_checkpoint()
 
-    model_data.forge_loading_parameters = dict(checkpoint_info=checkpoint_info, additional_modules=shared.opts.forge_additional_modules, unet_storage_dtype=model_data.forge_loading_parameters.get("unet_storage_dtype", None))
+    model_data.forge_loading_parameters = dict(checkpoint_info=checkpoint_info, additional_modules=opts.forge_additional_modules, unet_storage_dtype=model_data.forge_loading_parameters.get("unet_storage_dtype", None))
 
 
 def find_vae(name: str) -> str:
@@ -211,14 +215,14 @@ def boolean_choice(reverse: bool = False):
 
 
 def format_value_add_label(p: StableDiffusionProcessing, opt: "AxisOption", x: T) -> str:
-    if type(x) == float:
+    if type(x) is float:
         x = round(x, 8)
 
     return f"{opt.label}: {x}"
 
 
 def format_value(p: StableDiffusionProcessing, opt: "AxisOption", x: T) -> T:
-    if type(x) == float:
+    if type(x) is float:
         x = round(x, 8)
     return x
 
@@ -264,7 +268,7 @@ class AxisOption:
         self.apply = apply
         self.format_value = format_value
         self.confirm = confirm
-        self.cost = cost
+        self.cost = cost if opts.xyz_use_cost else 0.0
         self.prepare = prepare
         self.choices = choices
 
@@ -292,30 +296,31 @@ axis_options = [
     AxisOption("Shift", float, apply_field("distilled_cfg_scale")),
     AxisOption("Rescale CFG", float, apply_field("rescale_cfg")),
     AxisOption("MaHiRo", str, apply_field("mahiro"), choices=boolean_choice(reverse=True)),
-    AxisOption("Prompt S/R", str, apply_prompt, format_value=format_value),
-    AxisOption("Prompt order", str_permutations, apply_order, format_value=format_value_join_list),
+    AxisOption("Prompt S/R", str, apply_prompt, cost=0.1, format_value=format_value),
+    AxisOption("Prompt order", str_permutations, apply_order, cost=0.1, format_value=format_value_join_list),
     AxisOptionTxt2Img("Sampler", str, apply_field("sampler_name"), format_value=format_value, confirm=confirm_samplers, choices=lambda: [x.name for x in sd_samplers.samplers if x.name not in opts.hide_samplers]),
     AxisOptionTxt2Img("Hires sampler", str, apply_field("hr_sampler_name"), confirm=confirm_samplers, choices=lambda: [x.name for x in sd_samplers.samplers_for_img2img if x.name not in opts.hide_samplers]),
     AxisOptionImg2Img("Sampler", str, apply_field("sampler_name"), format_value=format_value, confirm=confirm_samplers, choices=lambda: [x.name for x in sd_samplers.samplers_for_img2img if x.name not in opts.hide_samplers]),
     AxisOption("Schedule type", str, apply_field("scheduler"), choices=lambda: [x.label for x in sd_schedulers.schedulers]),
-    AxisOption("Checkpoint name", str, apply_checkpoint, format_value=format_remove_path, confirm=confirm_checkpoints, cost=1.0, choices=lambda: sorted(sd_models.checkpoints_list, key=str.casefold)),
+    AxisOption("Checkpoint name", str, apply_checkpoint, format_value=format_remove_path, confirm=confirm_checkpoints, cost=2.0, choices=lambda: sorted(checkpoints_list, key=str.casefold)),
     AxisOption("VAE", str, apply_vae, cost=0.7, choices=lambda: ["None", *sorted(sd_vae.vae_dict.keys())]),
+    AxisOption('VAE ("state_dict" only)', str, apply_vae_fast, cost=0.3, choices=lambda: ["None", *sorted(sd_vae.vae_dict.keys())]),
     AxisOption("Clip skip", int, apply_override("CLIP_stop_at_last_layers")),
     AxisOption("Denoising", float, apply_field("denoising_strength")),
     AxisOption("Initial noise multiplier", float, apply_field("initial_noise_multiplier")),
     AxisOption("Extra noise", float, apply_override("img2img_extra_noise")),
     AxisOptionTxt2Img("Hires upscaler", str, apply_field("hr_upscaler"), choices=lambda: [*shared.latent_upscale_modes, *[x.name for x in shared.sd_upscalers]]),
-    AxisOption("Styles", str, apply_styles, choices=lambda: list(shared.prompt_styles.styles)),
+    AxisOption("Styles", str, apply_styles, cost=0.1, choices=lambda: list(shared.prompt_styles.styles)),
     AxisOption("Face restore", str, apply_face_restore, format_value=format_value),
     AxisOption("Negative Guidance minimum sigma", float, apply_field("s_min_uncond")),
     AxisOption("Token merging ratio", float, apply_override("token_merging_ratio")),
     AxisOption("Token merging ratio high-res", float, apply_override("token_merging_ratio_hr")),
-    AxisOption("Refiner checkpoint", str, apply_field("refiner_checkpoint"), format_value=format_remove_path, confirm=confirm_checkpoints_or_none, cost=1.0, choices=lambda: ["None"] + sorted(sd_models.checkpoints_list, key=str.casefold)),
+    AxisOption("Refiner checkpoint", str, apply_field("refiner_checkpoint"), format_value=format_remove_path, confirm=confirm_checkpoints_or_none, cost=1.0, choices=lambda: ["None"] + sorted(checkpoints_list, key=str.casefold)),
     AxisOption("Refiner switch at", float, apply_field("refiner_switch_at")),
     AxisOption("RNG source", str, apply_override("randn_source"), choices=lambda: ["GPU", "CPU", "NV"]),
 ]
 
-if cmd_opts.adv_samplers:
+if shared.cmd_opts.adv_samplers:
     axis_options.extend(
         [
             AxisOption("Var. seed", int, apply_field("subseed")),
@@ -332,7 +337,7 @@ if cmd_opts.adv_samplers:
             AxisOption("Beta schedule beta", float, apply_override("beta_dist_beta")),
             AxisOption("Eta", float, apply_field("eta")),
             AxisOptionImg2Img("Cond. Image Mask Weight", float, apply_field("inpainting_mask_weight")),
-            AxisOption("UniPC Order", int, apply_uni_pc_order, cost=0.5),
+            AxisOption("UniPC Order", int, apply_uni_pc_order),
             AxisOption("Always discard next-to-last sigma", str, apply_override("always_discard_next_to_last_sigma", boolean=True), choices=boolean_choice(reverse=True)),
             AxisOption("SGM noise multiplier", str, apply_override("sgm_noise_multiplier", boolean=True), choices=boolean_choice(reverse=True)),
         ]
@@ -351,7 +356,7 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
 
     processed_result = None
 
-    state.job_count = list_size * p.n_iter
+    shared.state.job_count = list_size * p.n_iter
 
     def process_cell(x, y, z, ix, iy, iz):
         nonlocal processed_result
@@ -359,7 +364,7 @@ def draw_xyz_grid(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, draw_legend
         def index(ix, iy, iz):
             return ix + iy * len(xs) + iz * len(xs) * len(ys)
 
-        state.job = f"{index(ix, iy, iz) + 1} out of {list_size}"
+        shared.state.job = f"{index(ix, iy, iz) + 1} out of {list_size}"
 
         processed: Processed = cell(x, y, z, ix, iy, iz)
 
@@ -477,7 +482,7 @@ class Script(scripts.Script):
         return "X/Y/Z plot"
 
     def ui(self, is_img2img):
-        self.current_axis_options = [x for x in axis_options if type(x) == AxisOption or x.is_img2img == is_img2img]
+        self.current_axis_options = [x for x in axis_options if type(x) is AxisOption or x.is_img2img == is_img2img]
 
         with gr.Group(elem_classes=["xyz_entries"]):
             with gr.Row():
@@ -614,7 +619,7 @@ class Script(scripts.Script):
         x_type, y_type, z_type = x_type or 0, y_type or 0, z_type or 0  # if axle type is None set to 0
 
         if not no_fixed_seeds:
-            modules.processing.fix_seed(p)
+            fix_seed(p)
 
         if not opts.return_grid:
             p.batch_size = 1
@@ -630,7 +635,7 @@ class Script(scripts.Script):
             else:
                 valslist = csv_string_to_list_strip(vals)
 
-            if opt.type == int:
+            if opt.type is int:
                 valslist_ext = []
 
                 for val in valslist:
@@ -654,7 +659,7 @@ class Script(scripts.Script):
                         valslist_ext.append(val)
 
                 valslist = valslist_ext
-            elif opt.type == float:
+            elif opt.type is float:
                 valslist_ext = []
 
                 for val in valslist:
@@ -749,15 +754,16 @@ class Script(scripts.Script):
         logger.info(f"X/Y/Z plot will create {len(xs) * len(ys) * len(zs) * image_cell_count} images on {len(zs)} {len(xs)}x{len(ys)} grid{plural_s}{cell_console_text}. (Total steps to process: {total_steps})")
         shared.total_tqdm.updateTotal(total_steps)
 
-        state.xyz_plot_x = AxisInfo(x_opt, xs)
-        state.xyz_plot_y = AxisInfo(y_opt, ys)
-        state.xyz_plot_z = AxisInfo(z_opt, zs)
+        shared.state.xyz_plot_x = AxisInfo(x_opt, xs)
+        shared.state.xyz_plot_y = AxisInfo(y_opt, ys)
+        shared.state.xyz_plot_z = AxisInfo(z_opt, zs)
 
-        # If one of the axes is very slow to change between (like SD model
-        # checkpoint), then make sure it is in the outer iteration of the nested
-        # `for` loop.
         first_axes_processed = "z"
         second_axes_processed = "y"
+
+        # If one of the axes is very slow to change (e.g. Checkpoint),
+        # then make sure it is in the outer iteration of the nested loop.
+
         if x_opt.cost > y_opt.cost and x_opt.cost > z_opt.cost:
             first_axes_processed = "x"
             if y_opt.cost > z_opt.cost:
@@ -780,7 +786,7 @@ class Script(scripts.Script):
         grid_infotext = [None] * (1 + len(zs))
 
         def cell(x, y, z, ix, iy, iz):
-            if shared.state.interrupted or state.stopping_generation:
+            if shared.state.interrupted or shared.state.stopping_generation:
                 return Processed(p, [], p.seed, "")
 
             pc = copy(p)

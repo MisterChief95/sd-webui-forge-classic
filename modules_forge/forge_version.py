@@ -1,2 +1,2 @@
 version = "neo"
-release = "2.30"
+release = "2.31"

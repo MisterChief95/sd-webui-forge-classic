@@ -592,9 +592,13 @@ def _process_alpha(image: Image.Image) -> Image.Image:
     if alpha.getextrema() == (255, 255):
         return image.convert("RGB")
 
+    if opts.alpha_threshold < 1:
+        return image
+
+    alpha = alpha.point(lambda a: 0 if a < opts.alpha_threshold else a)
     rgb = image.convert("RGB")
-    zero_alpha = alpha.point(lambda a: 255 if a < 16 else 0)
-    rgb.paste((0, 0, 0), mask=zero_alpha)
+    zero_alpha = alpha.point(lambda a: 255 if a < 1 else 0)
+    rgb.paste("black", mask=zero_alpha)
 
     return Image.merge("RGBA", (*rgb.split(), alpha))
 

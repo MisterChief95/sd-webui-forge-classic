@@ -62,5 +62,11 @@ class KModel(torch.nn.Module):
         input_shapes = [input_shape]
         area = sum(map(lambda input_shape: input_shape[0] * math.prod(input_shape[2:]), input_shapes))
 
-        _size = 8 if (attention.attention_function is attention.attention_basic) else memory_management.dtype_size(self.computation_dtype)
+        if attention.attention_function is attention.attention_basic:
+            _size = 8
+        elif args.dynamic_args.ops.startswith("Mixed"):
+            _size = 1
+        else:
+            _size = memory_management.dtype_size(self.computation_dtype)
+
         return (area * _size * 0.02 * self.config.memory_usage_factor) * (1024 * 1024)

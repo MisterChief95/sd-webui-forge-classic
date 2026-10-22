@@ -63,6 +63,7 @@ options_templates.update(
             "save_mask_composite": OptionInfo(False, "For inpainting, save the masked composite"),
             "jpeg_quality": OptionInfo(85, "JPEG Quality", gr.Slider, {"minimum": 1, "maximum": 100, "step": 1}),
             "webp_lossless": OptionInfo(False, "Lossless WebP"),
+            "alpha_threshold": OptionInfo(16, "Alpha Threshold", gr.Slider, {"minimum": 0, "maximum": 255, "step": 1}).info("alpha below this value is considered fully transparent"),
             "export_for_4chan": OptionInfo(True, "Save copies of large images as JPG").info("if the following limits are met"),
             "img_downscale_threshold": OptionInfo(4.0, "File Size limit for the above option", gr.Number).info("in MB"),
             "target_side_length": OptionInfo(4096, "Width/Height limit for the above option", gr.Number).info("in pixels"),
@@ -237,6 +238,13 @@ options_templates.update(
             "sdxl_refiner_high_aesthetic_score": OptionInfo(6.0, "[SDXL] High Aesthetic Score", gr.Number),
             "sdxl_10": OptionRow(),
             "sdxl_zero_neg": OptionInfo(False, "[SDXL] Zero out the conditioning when negative prompt is empty").info("old behavior ; causes NaN when using SageAttention").needs_reload_ui(),
+            "divslg": OptionDiv(),
+            "slg_enable": OptionInfo(True, "[Moss-Image] Enable Skip Layer Guidance", infotext="Skip Layer Guidance").info("the official document recommends skipping uncond for layer 22, optionally 24 and 26"),
+            "slg_single_layers": OptionInfo("22", "Layers to Skip", gr.Textbox, {"lines": 1, "max_lines": 1, "placeholder": "22, 24, 26"}, infotext="SLG Single Layers").info("comma-separated block indices"),
+            "slg_1": OptionRow(),
+            "slg_start_percent": OptionInfo(0.0, "Start Percent", gr.Number, infotext="SLG Start Percent"),
+            "slg_end_percent": OptionInfo(0.5, "End Percent", gr.Number, infotext="SLG End Percent"),
+            "slg_0": OptionRow(),
             "divlumina": OptionDiv(),
             "neta_template_positive": OptionInfo(
                 "You are an assistant designed to generate anime images with the highest degree of image-text alignment based on danbooru tags. <Prompt Start>",
@@ -428,6 +436,7 @@ options_templates.update(
             "quicksettings_accordion_starts_closed": OptionInfo(False, "Close the Accordion on startup").info("for the above option").needs_reload_ui(),
             "remove_image_on_hover": OptionInfo(True, "For image inputs in Extras and PNG Info, remove the current image when dragging another image over it").info("allow you to drag-and-drop images onto the input similar to AUTOMATIC1111 behavior").needs_reload_ui(),
             "forbidden_knowledge": OptionInfo(False, "Forbidden Knowledge").info('replace "<b>DPM++ 2s a RF</b>" with "<b>Flux Realistic</b>"').needs_restart(),
+            "xyz_use_cost": OptionInfo(True, "Enable the cost system for X/Y/Z Plot").info("swap expensive axis (e.g. Checkpoint) the least number of times ; may generate images out of the order specified in the UI").needs_restart(),
             "div_prompt": OptionDiv(),
             "prompt_box_style": OptionInfo("Default", "Prompt Layout", gr.Radio, {"choices": ("Default", "Compact", "Scrollable", "Accordion")}).html(f"""
 <ul style='margin-left: 1.5em'>

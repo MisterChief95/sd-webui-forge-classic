@@ -20,6 +20,7 @@ from backend.diffusion_engine.flux import Flux
 from backend.diffusion_engine.flux2 import Flux2
 from backend.diffusion_engine.krea import Krea2
 from backend.diffusion_engine.lumina import Lumina2
+from backend.diffusion_engine.moss_image import MOSSImage
 from backend.diffusion_engine.mugen import Mugen
 from backend.diffusion_engine.pid import PiD
 from backend.diffusion_engine.qwen import QwenImage
@@ -44,7 +45,7 @@ from backend.utils import (
 )
 from modules_forge.packages.comfy.utils import convert_diffusers_mmdit
 
-possible_models: tuple["ForgeDiffusionEngine"] = (StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, QwenImage21, Krea2, Lumina2, ZImage, Anima, ErnieImage, PiD)
+possible_models: tuple["ForgeDiffusionEngine"] = (StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, QwenImage21, Krea2, Lumina2, ZImage, Anima, ErnieImage, PiD, MOSSImage)
 
 logger = logging.getLogger("loader")
 setup_logger(logger)
@@ -74,7 +75,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
         def _detect_dtype(key: str, storage_dtype: torch.dtype, quant_config: dict = None) -> torch.dtype:
             if quant_config is not None:
-                logger.info(f"Using MixedPrecision for {key}")
+                logger.info(f"Using {quant_config.pop('layout')} for {key}")
                 return state_dict_dtype
             elif state_dict_dtype in (torch.float8_e4m3fn, torch.float8_e5m2, "gguf"):
                 _log = f"{state_dict_dtype}" + (" (pre-quant)" if state_dict_dtype == "gguf" else "")
@@ -297,6 +298,36 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             load_state_dict(model, state_dict, log_name=cls_name, ignore_start="lm_head.")
             return model
+        if cls_name == "Qwen3_5Model":
+            assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have Qwen3.5 state dict!"
+
+            config = read_arbitrary_config(config_path)
+
+            from backend.nn.llm.llama import Qwen35_9B
+
+            quant_config = detect_quantization(state_dict)
+            storage_dtype = _detect_dtype("Qwen3.5", memory_management.text_encoder_dtype(), quant_config)
+
+            if storage_dtype == "gguf":
+                with no_init_weights():
+                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, extra_dtype=storage_dtype):
+                        model = Qwen35_9B(config)
+            else:
+                with no_init_weights():
+                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, sd_dtype=state_dict_dtype, extra_dtype=quant_config):
+                        model = Qwen35_9B(config)
+
+            state_dict = state_dict_prefix_replace(
+                state_dict,
+                {
+                    "model.language_model.": "model.",
+                    "model.visual.": "visual.",
+                    "lm_head.": "model.lm_head.",
+                },
+            )
+
+            load_state_dict(model, state_dict, log_name=cls_name, ignore_start=["mtp", "visual", "model.lm_head"])
+            return model
         if cls_name in ["T5EncoderModel", "UMT5EncoderModel"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have T5 state dict!"
 
@@ -331,7 +362,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
         # region UNet / DiT
 
-        if cls_name in ["UNet2DConditionModel", "FluxTransformer2DModel", "Flux2Transformer2DModel", "ChromaTransformer2DModel", "WanTransformer3DModel", "QwenImageTransformer2DModel", "QwenImage21Transformer2DModel", "Lumina2Transformer2DModel", "ZImageTransformer2DModel", "CosmosTransformer3DModel", "ErnieImageTransformer2DModel", "PiDTransformer2DModel", "Krea2Transformer2DModel"]:
+        if cls_name in ["UNet2DConditionModel", "FluxTransformer2DModel", "Flux2Transformer2DModel", "ChromaTransformer2DModel", "WanTransformer3DModel", "QwenImageTransformer2DModel", "QwenImage21Transformer2DModel", "Lumina2Transformer2DModel", "ZImageTransformer2DModel", "CosmosTransformer3DModel", "ErnieImageTransformer2DModel", "PiDTransformer2DModel", "Krea2Transformer2DModel", "MOSSImageTransformer"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have model state dict!"
             pre_func: Callable[[torch.nn.Module], torch.nn.Module] = lambda mdl: mdl
             model_loader = None
@@ -401,6 +432,10 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 from backend.nn.krea import SingleStreamDiT
 
                 model_loader = lambda c: SingleStreamDiT(**c)
+            elif cls_name == "MOSSImageTransformer":
+                from backend.nn.moss_image import MOSSImage as MOSSImageDiT
+
+                model_loader = lambda c: MOSSImageDiT(**c)
 
             load_device = memory_management.get_torch_device()
             offload_device = memory_management.unet_offload_device()
@@ -416,7 +451,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 logger.info(f"Using Nunchaku Model Data Type: {storage_dtype}")
             elif quant_config is not None:
                 storage_dtype = torch.bfloat16
-                logger.info("Using MixedPrecision for Model")
+                logger.info(f"Using {quant_config.pop('layout')} for Model")
             elif state_dict_dtype in (torch.float8_e4m3fn, torch.float8_e5m2, "gguf"):
                 storage_dtype = state_dict_dtype
                 _log = f"{state_dict_dtype}" + (" (pre-quant)" if state_dict_dtype == "gguf" else "")
@@ -684,7 +719,13 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
             sd[f"{text_encoder_key_prefix}t5xxl.transformer.{k}"] = True
         sd[f"{text_encoder_key_prefix}t5xxl.transformer.filename"] = str(path)
 
-    if "model.layers.0.post_feedforward_layernorm.weight" in asd:
+    if "model.language_model.layers.0.linear_attn.A_log" in asd and "model.language_model.layers.0.input_layernorm.weight" in asd:
+        weight = asd["model.language_model.layers.0.input_layernorm.weight"]
+        assert weight.shape[0] == 4096
+        for k, v in asd.items():
+            sd[f"{text_encoder_key_prefix}qwen35_9b.transformer.{k}"] = v
+
+    elif "model.layers.0.post_feedforward_layernorm.weight" in asd:
         assert "model.layers.0.self_attn.q_norm.weight" not in asd
         for k, v in asd.items():
             if k == "spiece_model":
@@ -862,6 +903,7 @@ def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = No
     backend.args.dynamic_args.pid = "PiD" in repo_name
     backend.args.dynamic_args.anima = "Anima" in repo_name
     backend.args.dynamic_args.krea2 = "Krea-2" in repo_name
+    backend.args.dynamic_args.moss = "MOSS-Image" in repo_name
 
     if "xl" in repo_name and "rectified" in str(sd).lower():
         estimated_config.sampling_settings["RF"] = True

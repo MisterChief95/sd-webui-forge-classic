@@ -821,18 +821,12 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             if _vae_override is not None:
                 global _overridden_modules
                 _overridden_modules = shared.opts.forge_additional_modules.copy()
-                override: str = _vae_override
-                all_vae: list[str] = sd_vae.vae_dict.keys()
-                for i in range(len(_overridden_modules)):
-                    if os.path.basename(_overridden_modules[i]) in all_vae:
-                        if _overridden_modules[i] != override:
-                            _overridden_modules.pop(i)
-                        else:
-                            override = None
+                for module in shared.opts.forge_additional_modules:
+                    if module in sd_vae.vae_dict.values():
+                        _overridden_modules.remove(module)
                         break
-
-                if sd_vae.reload_vae_weights(override):
-                    _overridden_modules.append(override)
+                if sd_vae.reload_vae_weights(_vae_override):
+                    _overridden_modules.append(_vae_override)
 
         # backwards compatibility, fix sampler and scheduler if invalid
         sd_samplers.fix_p_invalid_sampler_and_scheduler(p)

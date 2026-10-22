@@ -3,7 +3,7 @@ import json
 import torch
 
 
-def load_state_dict(model: torch.nn.Module, sd: dict[str, torch.Tensor], ignore_errors: list[str] = [], log_name: str = None, ignore_start: str = None):
+def load_state_dict(model: torch.nn.Module, sd: dict[str, torch.Tensor], ignore_errors: list[str] = [], log_name: str = None, ignore_start: str | list[str] = None):
     is_meta = any(p.is_meta for p in model.parameters())
 
     if is_meta:
@@ -25,9 +25,11 @@ def load_state_dict(model: torch.nn.Module, sd: dict[str, torch.Tensor], ignore_
     missing = [x for x in missing if x not in ignore_errors]
     unexpected = [x for x in unexpected if x not in ignore_errors]
 
-    if isinstance(ignore_start, str):
-        missing = [x for x in missing if not x.startswith(ignore_start)]
-        unexpected = [x for x in unexpected if not x.startswith(ignore_start)]
+    if ignore_start is not None:
+        missing = [x for x in missing if not x.startswith(tuple(ignore_start))]
+        unexpected = [x for x in unexpected if not x.startswith(tuple(ignore_start))]
+
+    unexpected = [x for x in unexpected if "comfy_attention" not in x]
 
     log_name = log_name or type(model).__name__
     if len(missing) > 0:
@@ -120,8 +122,21 @@ def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
 
 
 def detect_quantization(state_dict: dict[str, torch.Tensor], *, is_unet: bool = False) -> dict | None:
-    if any(k.endswith(".comfy_quant") for k in state_dict):
-        return {"mixed_ops": True, "TE": not is_unet}
+    count: dict[str, int] = {}
+
+    for key, val in state_dict.items():
+        if not key.endswith(".comfy_quant"):
+            continue
+
+        fmt: str = json.loads(val.numpy().tobytes())["format"]
+        count[fmt] = count.get(fmt, 0) + 1
+
+    if count:
+        from backend.quant_ops import QUANT_ALGOS
+
+        layout: str = QUANT_ALGOS[max(count, key=count.get)]["comfy_tensor_layout"]
+        return {"mixed_ops": True, "TE": not is_unet, "layout": layout}
+
     return None
 
 
