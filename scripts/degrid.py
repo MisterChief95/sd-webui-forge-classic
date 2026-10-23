@@ -13,7 +13,7 @@ class ScriptPostprocessingDegrid(scripts_postprocessing.ScriptPostprocessing):
     order = 900
 
     def ui(self):
-        with InputAccordion(True, label="DeGrid", elem_id="extras_degrid") as degrid_enabled:
+        with InputAccordion(False, label="DeGrid", elem_id="extras_degrid") as degrid_enabled:
             degrid_threshold = gr.Slider(value=0.0, minimum=0.0, maximum=1.0, step=0.05, label="Threshold", info="0.0 for Auto", elem_id="extras_degrid_threshold")
 
         return {

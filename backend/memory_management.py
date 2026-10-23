@@ -1095,7 +1095,7 @@ def pytorch_attention_enabled() -> bool:
 
 
 def pytorch_attention_enabled_vae() -> bool:
-    return ENABLE_PYTORCH_ATTENTION and not is_amd()
+    return ENABLE_PYTORCH_ATTENTION
 
 
 def pytorch_attention_flash_attention() -> bool:

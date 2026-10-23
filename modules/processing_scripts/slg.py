@@ -11,6 +11,7 @@ from backend.args import dynamic_args
 from backend.patcher.base import set_model_options_patch_replace
 from backend.sampling import sampling_function
 from modules import scripts
+from modules.script_callbacks import on_script_unloaded
 from modules.shared import opts
 
 _calc_cond_uncond_batch = sampling_function.calc_cond_uncond_batch
@@ -18,9 +19,9 @@ _calc_cond_uncond_batch = sampling_function.calc_cond_uncond_batch
 
 @wraps(_calc_cond_uncond_batch)
 def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
-    if (calc_batch_function := model_options.get("sampler_calc_cond_batch_function", None)) is None:
-        return _calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options)
-    return calc_batch_function(model, cond, uncond, x_in, timestep, model_options)
+    if (calc_batch_function := model_options.get("sampler_calc_cond_batch_function", None)) is not None:
+        return calc_batch_function(model, cond, uncond, x_in, timestep, model_options)
+    return _calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options)
 
 
 sampling_function.calc_cond_uncond_batch = calc_cond_uncond_batch
@@ -87,7 +88,7 @@ class SkipLayerGuidance(scripts.Script):
 
             sigma_ = sigma[0].item()
 
-            if sigma_ >= sigma_end and sigma_ <= sigma_start and uncond is not None:
+            if sigma_end <= sigma_ <= sigma_start and uncond is not None:
                 cond_out, _ = _calc_cond_uncond_batch(model, cond, None, x, sigma, model_options)
                 _, uncond_out = _calc_cond_uncond_batch(model, [], uncond, x, sigma, slg_model_options)
                 return [cond_out, uncond_out]
@@ -95,3 +96,10 @@ class SkipLayerGuidance(scripts.Script):
             return _calc_cond_uncond_batch(model, cond, uncond, x, sigma, model_options)
 
         return calc_batch_function
+
+
+def revert():
+    sampling_function.calc_cond_uncond_batch = _calc_cond_uncond_batch
+
+
+on_script_unloaded(revert)
