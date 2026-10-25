@@ -242,6 +242,18 @@ def model_lora_keys_unet(model, key_map={}):
                     key_map["transformer.{}".format(key_lora)] = to
                     key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to  # SimpleTuner lycoris format
 
+    if "moss" in _model_name:
+        for k in sdk:
+            if k.startswith("diffusion_model.") and k.endswith(".weight"):
+                key_map[k[len("diffusion_model.") : -len(".weight")]] = k  # bare module paths
+            if k.endswith(".proj.qkv.weight"):  # fused q/k/v files; LoRAs address the separate projections
+                third = sd[k].shape[0] // 3
+                for i, proj in enumerate(("q", "k", "v")):
+                    key_lora = "{}.{}".format(k[: -len(".qkv.weight")], proj)
+                    key_map[key_lora] = (k, (0, i * third, third))
+                    key_map[key_lora[len("diffusion_model.") :]] = (k, (0, i * third, third))
+                    key_map["lora_unet_{}".format(key_lora[len("diffusion_model.") :].replace(".", "_"))] = (k, (0, i * third, third))
+
     if "lumina" in _model_name or "z-image" in _model_name:
         diffusers_keys = z_image_to_diffusers(model.diffusion_model.config, output_prefix="diffusion_model.")
         for k in diffusers_keys:
