@@ -8,8 +8,7 @@ class Emphasis:
     description: str = ""
 
     def __call__(self, z: torch.Tensor, multipliers: torch.Tensor):
-
-        pass
+        return z
 
 
 class EmphasisNone(Emphasis):

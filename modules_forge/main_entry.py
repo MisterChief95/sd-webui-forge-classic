@@ -1,6 +1,6 @@
 import logging
 import os.path
-from typing import Callable
+from typing import Callable, OrderedDict
 
 import gradio as gr
 import torch
@@ -40,8 +40,8 @@ forge_unet_storage_dtype_options: dict[str, tuple[torch.dtype, bool]] = {
 }
 
 
-module_list: dict[str, os.PathLike] = {}
-module_map: dict[str, str] = {}
+module_list: OrderedDict[str, os.PathLike] = OrderedDict()
+module_map: OrderedDict[str, str] = OrderedDict()
 
 
 def make_checkpoint_manager_ui():
@@ -53,7 +53,11 @@ def make_checkpoint_manager_ui():
         if len(sd_models.checkpoints_list) > 0:
             shared.opts.set("sd_model_checkpoint", next(iter(sd_models.checkpoints_list.values())).name)
 
-    ui_forge_preset = gr.Dropdown(label="UI Preset", value=shared.opts.forge_preset, choices=PresetArch.choices(), elem_id="forge_ui_preset")
+    def preset_choices():
+        presets = [p for p in PresetArch.choices() if p not in shared.cmd_opts.disable_preset]
+        return sorted(presets) if shared.cmd_opts.sort_preset else presets
+
+    ui_forge_preset = gr.Dropdown(label="UI Preset", value=shared.opts.forge_preset, choices=preset_choices(), elem_id="forge_ui_preset")
 
     ui_checkpoint = gr.Dropdown(label="Checkpoint", value=None, choices=None, elem_id="setting_sd_model_checkpoint", elem_classes=["model_selection"])
 
@@ -91,8 +95,8 @@ def refresh_models() -> tuple[list[os.PathLike], list[os.PathLike]]:
 
     file_extensions = ("ckpt", "pt", "pth", "bin", "safetensors", "sft", "gguf")
 
-    module_list.clear()
-    module_map.clear()
+    _module_list: dict[str, os.PathLike] = {}
+    _module_map: dict[str, str] = {}
 
     module_paths: set[os.PathLike] = {
         os.path.abspath(os.path.join(paths.models_path, "VAE")),
@@ -103,19 +107,25 @@ def refresh_models() -> tuple[list[os.PathLike], list[os.PathLike]]:
 
     for vae_path in module_paths:
         vae_files = find_files_with_extensions(vae_path, file_extensions)
-        module_list.update(vae_files)
+        _module_list.update(vae_files)
 
         for file, path in vae_files.items():
             rel = os.path.normpath(os.path.relpath(path, vae_path))
-            module_map[file] = rel
+            _module_map[file] = rel
+
+    module_list.clear()
+    module_map.clear()
+
+    module_list.update({title: _module_list[title] for title in sorted(_module_list)})
+    module_map.update({title: _module_map[title] for title in sorted(_module_map)})
 
     if shared.opts.sd_modules_dropdown_use_short:
-        return sorted(ckpt_list), sorted(module_list.keys())
+        return ckpt_list, list(module_list.keys())
     else:
-        return sorted(ckpt_list), sorted(module_map.values())
+        return ckpt_list, list(module_map.values())
 
 
-def refresh_model_loading_parameters(*, refresh: bool = True):
+def refresh_model_loading_parameters(*, refresh: bool = True, disable_log: bool = False):
     if not refresh:
         return
 
@@ -134,17 +144,21 @@ def refresh_model_loading_parameters(*, refresh: bool = True):
     modules: list[str] = [os.path.basename(x) for x in shared.opts.forge_additional_modules]
     dtype = str(unet_storage_dtype or [torch.float16, torch.bfloat16])
 
-    logger.info("Model Selected:")
-    print_json(data=dict(checkpoint=os.path.basename(ckpt), modules=modules, dtype=dtype))
+    if not disable_log:
+        logger.info("Model Selected:")
+        print_json(data=dict(checkpoint=os.path.basename(ckpt), modules=modules, dtype=dtype))
 
     if ckpt.endswith(("gguf", "GGUF")) and not lora_fp16:
-        logger.warning("GGUF requires fp16 LoRA ; overriding option")
         lora_fp16 = True
+        if not disable_log:
+            logger.warning("GGUF requires fp16 LoRA ; overriding option")
 
     dynamic_args.online_lora = lora_fp16
-    logger.info(f"Patch LoRAs on-the-fly: {lora_fp16}")
-    if not ckpt.endswith(("gguf", "GGUF")) and lora_fp16:
-        logger.warning("on-the-fly WILL be slower ; enable only if you know what you are doing")
+
+    if not disable_log:
+        logger.info(f"Patch LoRAs on-the-fly: {lora_fp16}")
+        if not ckpt.endswith(("gguf", "GGUF")) and lora_fp16:
+            logger.warning("on-the-fly WILL be slower ; enable only if you know what you are doing")
 
     processing.need_global_unload = True
 
@@ -298,7 +312,7 @@ def on_preset_change(preset: str):
 
     modules_value = [os.path.basename(m) for m in getattr(shared.opts, f"forge_additional_modules_{preset}", [])]
     if not shared.opts.sd_modules_dropdown_use_short:
-        modules_value = [module_map[m] for m in modules_value]
+        modules_value = [module_map[m] for m in modules_value if m in module_map]
 
     return [
         # ui_checkpoint, ui_vae, ui_forge_unet_dtype

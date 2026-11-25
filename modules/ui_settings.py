@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 
@@ -328,23 +329,26 @@ class UiSettings:
                 )
 
         text_set_checkpoint = gr.Textbox("", elem_id="change_checkpoint_text", visible=False)
-        button_set_checkpoint = gr.Button("Change checkpoint", elem_id="change_checkpoint", visible=False)
+        text_set_modules = gr.Textbox("", elem_id="change_modules_text", visible=False)
+        button_set_checkpoint = gr.Button("Change Models", elem_id="change_checkpoint", visible=False)
 
-        def _change_model(ckpt: str):
-            if (model := sd_models.get_closet_checkpoint_match(ckpt)) is not None:
-                return gr.update(value=model.name)
-            gr.Warning(f'Failed to find model "{ckpt}"')
-            return gr.skip()
+        def _change_model(ckpt: str, vaeTE: str):
+            assert (model := sd_models.get_closet_checkpoint_match(ckpt)) is not None
+            assert isinstance(modules := json.loads(vaeTE), list)
+            if shared.opts.sd_modules_dropdown_use_short:
+                modules = [main_entry.module_map[m] for m in modules]
+
+            return [gr.update(value=model.name), gr.update(value=modules) if modules else gr.skip()]
 
         button_set_checkpoint.click(
             fn=_change_model,
-            inputs=[text_set_checkpoint],
-            outputs=[main_entry.ui_checkpoint],
+            inputs=[text_set_checkpoint, text_set_modules],
+            outputs=[main_entry.ui_checkpoint, main_entry.ui_vae],
             queue=False,
             show_progress=False,
         ).success(
-            fn=main_entry.checkpoint_change,
-            inputs=[main_entry.ui_checkpoint, main_entry.ui_forge_preset],
+            fn=main_entry._load_presets,
+            inputs=[main_entry.ui_checkpoint, main_entry.ui_vae, main_entry.ui_forge_unet_dtype, main_entry.ui_forge_preset],
             queue=False,
             show_progress=False,
         )

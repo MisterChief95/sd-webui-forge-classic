@@ -15,7 +15,6 @@ import backend.args
 from backend import memory_management, utils
 from backend.diffusion_engine.anima import Anima
 from backend.diffusion_engine.chroma import Chroma
-from backend.diffusion_engine.ernie import ErnieImage
 from backend.diffusion_engine.flux import Flux
 from backend.diffusion_engine.flux2 import Flux2
 from backend.diffusion_engine.krea import Krea2
@@ -45,7 +44,7 @@ from backend.utils import (
 )
 from modules_forge.packages.comfy.utils import convert_diffusers_mmdit
 
-possible_models: tuple["ForgeDiffusionEngine"] = (StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, QwenImage21, Krea2, Lumina2, ZImage, Anima, ErnieImage, PiD, MOSSImage)
+possible_models: tuple["ForgeDiffusionEngine"] = (StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, QwenImage21, Krea2, Lumina2, ZImage, Anima, PiD, MOSSImage)
 
 logger = logging.getLogger("loader")
 setup_logger(logger)
@@ -165,6 +164,8 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 from backend.nn.wan_vae import WanVAE
 
                 config = WanVAE.load_config(config_path)
+                config["image_channels"] = int(state_dict["encoder.conv1.weight"].shape[1])
+                config["conv_out_channels"] = int(state_dict["decoder.head.2.weight"].shape[0])
                 dtype = memory_management.vae_dtype(allowed_dtypes=[torch.bfloat16, torch.float16, torch.float32])
 
             with no_init_weights():
@@ -233,27 +234,6 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             load_state_dict(model, state_dict, log_name=cls_name, ignore_start="lm_head.")
             return model
-        if cls_name == "Mistral3Model":
-            assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have Mistral3 state dict!"
-
-            from backend.nn.llm.llama import Ministral3_3B
-
-            config = read_arbitrary_config(config_path)
-
-            quant_config = detect_quantization(state_dict)
-            storage_dtype = _detect_dtype("Mistral3", memory_management.text_encoder_dtype(), quant_config)
-
-            if storage_dtype == "gguf":
-                with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, extra_dtype=storage_dtype):
-                        model = Ministral3_3B(config)
-            else:
-                with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, sd_dtype=state_dict_dtype, extra_dtype=quant_config):
-                        model = Ministral3_3B(config)
-
-            load_state_dict(model, state_dict, log_name=cls_name)
-            return model
         if cls_name in ["Qwen3Model", "Qwen3ForCausalLM", "Qwen3VLModel", "Qwen3VLForConditionalGeneration"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have Qwen3 state dict!"
 
@@ -310,7 +290,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             if storage_dtype == "gguf":
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, extra_dtype=storage_dtype):
+                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=True, extra_dtype=storage_dtype):
                         model = Qwen35_9B(config)
             else:
                 with no_init_weights():
@@ -326,7 +306,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 },
             )
 
-            load_state_dict(model, state_dict, log_name=cls_name, ignore_start=["mtp", "visual", "model.lm_head"])
+            load_state_dict(model, state_dict, log_name=cls_name, ignore_start=["mtp", "model.lm_head"])
             return model
         if cls_name in ["T5EncoderModel", "UMT5EncoderModel"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have T5 state dict!"
@@ -362,7 +342,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
         # region UNet / DiT
 
-        if cls_name in ["UNet2DConditionModel", "FluxTransformer2DModel", "Flux2Transformer2DModel", "ChromaTransformer2DModel", "WanTransformer3DModel", "QwenImageTransformer2DModel", "QwenImage21Transformer2DModel", "Lumina2Transformer2DModel", "ZImageTransformer2DModel", "CosmosTransformer3DModel", "ErnieImageTransformer2DModel", "PiDTransformer2DModel", "Krea2Transformer2DModel", "MOSSImageTransformer"]:
+        if cls_name in ["UNet2DConditionModel", "FluxTransformer2DModel", "Flux2Transformer2DModel", "ChromaTransformer2DModel", "WanTransformer3DModel", "QwenImageTransformer2DModel", "QwenImage21Transformer2DModel", "Lumina2Transformer2DModel", "ZImageTransformer2DModel", "CosmosTransformer3DModel", "PiDTransformer2DModel", "Krea2Transformer2DModel", "MOSSImageTransformer"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have model state dict!"
             pre_func: Callable[[torch.nn.Module], torch.nn.Module] = lambda mdl: mdl
             model_loader = None
@@ -420,10 +400,6 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 from backend.nn.anima import Anima
 
                 model_loader = lambda c: Anima(**c)
-            elif cls_name == "ErnieImageTransformer2DModel":
-                from backend.nn.ernie import ErnieImageModel
-
-                model_loader = lambda c: ErnieImageModel(**c)
             elif cls_name == "PiDTransformer2DModel":
                 from backend.nn.pixeldit.pid import PidNet
 
@@ -442,7 +418,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             unet_config = guess.unet_config.copy()
             state_dict_parameters = utils.calculate_parameters(state_dict)
-            quant_config = detect_quantization(state_dict, is_unet=True)
+            quant_config = "nunchaku" if guess.nunchaku else detect_quantization(state_dict, is_unet=True)
 
             override_dtype = backend.args.dynamic_args.forge_unet_storage_dtype
 
@@ -509,14 +485,14 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
     return None
 
 
-def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor], guess, path: os.PathLike):
+def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor], metadata: dict, guess, path: os.PathLike):
     vae_key_prefix = guess.vae_key_prefix[0]
     text_encoder_key_prefix = guess.text_encoder_key_prefix[0]
 
     if path.endswith("gguf"):
         from backend.loader_gguf import gguf_remapping
 
-        asd = gguf_remapping(asd)
+        asd = gguf_remapping(asd, metadata)
 
     #   flux 2
     if "decoder.post_quant_conv.weight" in asd:
@@ -749,16 +725,11 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
         for k, v in asd.items():
             sd[f"{text_encoder_key_prefix}qwen3_{size}.transformer.{k}"] = v
 
-    elif "model.layers.0.post_attention_layernorm.weight" in asd:
-        weight: torch.Tensor = asd["model.layers.0.post_attention_layernorm.weight"]
-        assert weight.shape[0] == 3072
-
+    if "visual.merger.linear_fc2.weight" in asd:
         for k, v in asd.items():
-            if not k.startswith("model"):
-                continue
-            sd[f"{text_encoder_key_prefix}ministral3_3b.transformer.{k}"] = v
-
-    if "visual.blocks.0.attn.proj.weight" in asd:
+            if k.startswith("visual."):
+                sd[f"{text_encoder_key_prefix}qwen35_9b.transformer.model.{k}"] = v
+    elif "visual.blocks.0.attn.proj.weight" in asd:
         for k, v in asd.items():
             sd[f"{text_encoder_key_prefix}qwen25_7b.{k}"] = v
 
@@ -855,8 +826,8 @@ def split_state_dict(path: os.PathLike, additional_state_dicts: list[os.PathLike
     if isinstance(additional_state_dicts, list):
         for asd in additional_state_dicts:
             _asd, _meta = load_torch_file(asd, return_metadata=True)
-            _asd, _ = convert_quantization(_asd, _meta)
-            sd = replace_state_dict(sd, _asd, guess, asd)
+            _asd, _meta = convert_quantization(_asd, _meta)
+            sd = replace_state_dict(sd, _asd, _meta, guess, asd)
             del _asd
 
     guess.clip_target = guess.clip_target(sd)

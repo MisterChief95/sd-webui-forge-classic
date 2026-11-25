@@ -404,32 +404,59 @@ class ForgeOperations:
 from backend.operations_gguf import dequantize_tensor
 
 
+def _gguf_nvfp4_to_tensorcore(weight, device, dtype):
+    from backend.float import to_blocked
+    from backend.operations_mixed_precision import QuantizedTensor
+    from backend.quant_ops import TensorCoreNVFP4Layout
+    from modules_forge.packages.gguf import quants
+
+    if getattr(weight, "gguf_cls", None) is not quants.NVFP4:
+        return None
+
+    rows, columns = weight.shape
+    if rows % 128 != 0 or columns % 64 != 0:
+        return None
+
+    blocks = weight.data.to(device=device).contiguous().reshape(rows, columns // 64, 36)
+    packed = blocks[..., 4:].reshape(rows, columns // 64, 4, 8)
+    nibbles = torch.cat((packed & 0xF, packed >> 4), dim=-1)
+    qdata = ((nibbles[..., ::2] << 4) | nibbles[..., 1::2]).reshape(rows, columns // 2).contiguous()
+
+    scale_codes = blocks[..., :4].reshape(rows, columns // 16)
+    scale_codes = torch.where(scale_codes == 0x7F, 0, scale_codes).to(torch.uint8).contiguous()
+    block_scale = to_blocked(scale_codes.view(torch.float8_e4m3fn), flatten=False)
+    scale = torch.ones((), device=device, dtype=torch.float32)
+    params = TensorCoreNVFP4Layout.Params(
+        scale=scale,
+        orig_dtype=dtype,
+        orig_shape=(rows, columns),
+        block_scale=block_scale,
+    )
+    return QuantizedTensor(qdata, "TensorCoreNVFP4Layout", params)
+
+
 class ForgeOperationsGGUF(ForgeOperations):
     class Linear(torch.nn.Module, ForgeWeights):
         def __init__(self, *args, **kwargs):
             super().__init__()
-            self.dummy = {"device": current_device, "dtype": current_dtype}
+            self._initial_device = current_device
+            self._computation_dtype = current_dtype if current_dtype in (torch.float16, torch.bfloat16) else torch.float16
             self.weight = None
             self.bias = None
 
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-            if hasattr(self, "dummy"):
-                if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
-                    computation_dtype = torch.float16
-
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
-                    self.weight.computation_dtype = computation_dtype
-                if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"].to(device=self.dummy["device"])
-                    self.bias.computation_dtype = computation_dtype
-
-                del self.dummy
-            else:
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"]
-                if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"]
+            if prefix + "weight" in state_dict:
+                weight = state_dict[prefix + "weight"].to(device=self._initial_device)
+                weight.computation_dtype = self._computation_dtype
+                if memory_management.supports_nvfp4_compute(memory_management.get_torch_device()):
+                    quantized_weight = _gguf_nvfp4_to_tensorcore(weight, weight.device, self._computation_dtype)
+                    if quantized_weight is not None:
+                        weight = quantized_weight
+                self.weight = utils.tensor2parameter(weight)
+            if prefix + "bias" in state_dict:
+                self.bias = utils.tensor2parameter(state_dict[prefix + "bias"].to(device=self._initial_device))
+                self.bias.computation_dtype = self._computation_dtype
+            self._initial_device = None
 
         def _apply(self, fn, recurse=True):
             for k, p in self.named_parameters(recurse=False, remove_duplicate=True):
@@ -442,7 +469,24 @@ class ForgeOperationsGGUF(ForgeOperations):
             if self.weight is not None and self.weight.dtype != x.dtype and getattr(self.weight, "gguf_cls", None) is None:
                 self.weight = utils.tensor2parameter(self.weight.to(x.dtype))
 
-            weight, bias, signal = weights_manual_cast(self, x, weight_fn=dequantize_tensor, skip_bias_dtype=True)
+            if isinstance(self.weight, QuantizedTensor) and not self.weight_function and not self.bias_function and x.ndim >= 2:
+                input_shape = x.shape
+                input_reshaped = x.reshape(-1, input_shape[-1]) if x.ndim >= 3 else x
+                quantized_input = QuantizedTensor.from_float(input_reshaped, self.weight._layout_cls)
+                weight, bias, signal = weights_manual_cast(
+                    self,
+                    quantized_input,
+                    skip_weight_dtype=True,
+                    skip_bias_dtype=True,
+                )
+                with main_stream_worker(weight, bias, signal):
+                    output = torch.nn.functional.linear(quantized_input, weight, bias)
+                if x.ndim >= 3:
+                    output = output.reshape((*input_shape[:-1], self.weight.shape[0]))
+                return output
+
+            weight_fn = (lambda weight: dequantize_tensor(weight, input=x)) if args.enable_triton_backend else dequantize_tensor
+            weight, bias, signal = weights_manual_cast(self, x, weight_fn=weight_fn, skip_bias_dtype=True)
             with main_stream_worker(weight, bias, signal):
                 return torch.nn.functional.linear(x, weight, bias)
 
@@ -451,28 +495,19 @@ class ForgeOperationsGGUF(ForgeOperations):
             kwargs["device"] = current_device
             kwargs["dtype"] = current_dtype
             super().__init__(*args, **kwargs)
-            self.dummy = {"device": current_device, "dtype": current_dtype}
+            self._initial_device = current_device
+            self._computation_dtype = current_dtype if current_dtype in (torch.float16, torch.bfloat16) else torch.float16
             self.weight = None
             self.bias = None
 
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-            if hasattr(self, "dummy"):
-                if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
-                    computation_dtype = torch.float16
-
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
-                    self.weight.computation_dtype = computation_dtype
-                if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"].to(device=self.dummy["device"])
-                    self.bias.computation_dtype = computation_dtype
-
-                del self.dummy
-            else:
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"]
-                if prefix + "bias" in state_dict:
-                    self.bias = state_dict[prefix + "bias"]
+            if prefix + "weight" in state_dict:
+                self.weight = utils.tensor2parameter(state_dict[prefix + "weight"].to(device=self._initial_device))
+                self.weight.computation_dtype = self._computation_dtype
+            if prefix + "bias" in state_dict:
+                self.bias = utils.tensor2parameter(state_dict[prefix + "bias"].to(device=self._initial_device))
+                self.bias.computation_dtype = self._computation_dtype
+            self._initial_device = None
 
         def _apply(self, fn, recurse=True):
             for k, p in self.named_parameters(recurse=False, remove_duplicate=True):
@@ -494,28 +529,18 @@ class ForgeOperationsGGUF(ForgeOperations):
             kwargs["device"] = current_device
             kwargs["dtype"] = current_dtype
             super().__init__(*args, **kwargs)
-            self.dummy = {"device": current_device, "dtype": current_dtype}
+            self._initial_device = current_device
+            self._computation_dtype = current_dtype if current_dtype in (torch.float16, torch.bfloat16) else torch.float16
             self.weight = None
             self.bias = None
 
             self._dtype = current_dtype
 
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-            if hasattr(self, "dummy"):
-                if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
-                    computation_dtype = torch.float16
-
-                if prefix + "weight" in state_dict:
-                    _weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
-                    if not isinstance(_weight, torch.nn.Parameter):
-                        _weight = torch.nn.Parameter(_weight, requires_grad=False)
-                    self.weight = _weight
-                    self.weight.computation_dtype = computation_dtype
-
-                del self.dummy
-            else:
-                if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"]
+            if prefix + "weight" in state_dict:
+                self.weight = utils.tensor2parameter(state_dict[prefix + "weight"].to(device=self._initial_device))
+                self.weight.computation_dtype = self._computation_dtype
+            self._initial_device = None
 
         def _apply(self, fn, recurse=True):
             for k, p in self.named_parameters(recurse=False, remove_duplicate=True):
@@ -583,6 +608,9 @@ def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
 class ForgeOperationsFP8(ForgeOperations):
     class Linear(ForgeOperations.Linear, ForgeWeights):
         def forward(self, x):
+            if len(self.weight_function) > 0 or len(self.bias_function) > 0:
+                return super().forward(x)
+
             try:
                 if (out := fp8_linear(self, x)) is not None:
                     return out
@@ -672,7 +700,7 @@ def using_forge_operations(
     dtype: torch.dtype = None,
     manual_cast_enabled: bool = False,
     sd_dtype: torch.dtype = None,
-    extra_dtype: torch.dtype = None,
+    extra_dtype: str | dict = None,
 ):
 
     if extra_dtype is None and dtype == sd_dtype and memory_management.is_device_cpu(device):

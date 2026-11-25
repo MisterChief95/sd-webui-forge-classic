@@ -22,12 +22,15 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 
 <br>
 
-## Features [Oct.]
+## Features [Nov.]
 > Most base features of the original [Automatic1111 Webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) should still function
 
 #### New Features
 
 - [X] Support [Moss-Image](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT)
+- [X] JSON Builder
+- [X] Support **Moss-Image-Edit**
+    - require specific [LoRA](https://huggingface.co/chinoll/Moss-Image-Edit)
 - [X] Support [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1)
 - [X] Support [Krea 2](https://huggingface.co/krea/Krea-2-Turbo)
 - [X] Support **Krea 2 Identity Edit**
@@ -41,7 +44,13 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - `4B` / `9B` (**not** `FLUX.2-Dev`)
 
 > [!Note]
-> To toggle between `img2img` and `reference` (`edit`) for `Qwen-Image-2.1` / `Krea 2` / `Anima` / `Flux.2-Klein`, refer to **Settings/Stable Diffusion**
+> To toggle between `img2img` and `reference` for Models with Edit capability, refer to **Settings/Stable Diffusion**
+
+- [X] Support **Anima RGBA**
+    - require specific [LoRA & VAE](https://huggingface.co/localai0301/Anima-RGBA)
+
+> [!Tip]
+> Set `img2img_background_color` to `(255, 255, 255)` to support `img2img` for transparent image
 
 - [X] Support [Ernie-Image](https://huggingface.co/baidu/ERNIE-Image)
 - [X] Support [PiD 1.5](https://huggingface.co/nvidia/PiD)
@@ -74,9 +83,12 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 > [!Note]
 > To be detected as a **Kontext** model, the model must include "`kontext`" in its path *(**e.g.** file name or folder name)*
 
-- Implement `ImageStitch Integrated`
-    - [X] support multi-image inputs for **Edit** models
-    - [X] support FirstLastFrameToVideo for `Wan 2.2`
+- [X] Implement `ImageStitch Integrated`
+    - support multi-image inputs for **Edit** models
+    - support FirstLastFrameToVideo for `Wan 2.2`
+- [X] Enforce Reference Resize
+    - **Edit** models resize image inputs to 1 megapixel by default
+    - adjust in **Settings/Stable Diffusion**
 - [X] Support [Nunchaku](https://github.com/nunchaku-tech/nunchaku) (`SVDQ`) Models (**Deprecated**)
     - `flux-dev`, `flux-krea`, `flux-kontext`, `qwen-image`, `qwen-image-edit`, `z-image-turbo`
     - only `Flux` and `Qwen` support LoRA currently
@@ -149,6 +161,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - enable in **Settings/Upscaling**
 - [X] Support (short) videos in **Extras** tab
 - [X] Add support for `.avif`, `.heif`, and `.jxl` image formats
+- [X] Checkpoint cards now also apply preferred Text Encoder & VAE
 - [X] Automatically determine the optimal row count for `X/Y/Z Plot`
 - [X] Update **LLLite** Controlnet
     - [SDXL](https://huggingface.co/kohya-ss/controlnet-lllite/tree/main) / [Anima](https://huggingface.co/kohya-ss/Anima-LLLite/tree/main)
@@ -177,9 +190,11 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Some Samplers & Schedulers
 - [X] Some Compatibility Settings
 - [X] Stealth Infotext
+- [X] `spandrel-extra-arches` Support
+    - manually install the package to use `CodeFormer`
 - [X] `bitsandbytes` Support
+- [X] `DirectML` Support
 - [ ] `Nunchaku` Support
-- [ ] `GGUF` Support
 
 #### Optimizations
 
@@ -187,6 +202,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] No longer `git` `clone` any repository on fresh install
 - [X] No longer create the UI twice when using `--api`
 - [X] No longer install `open-clip`
+- [X] No longer reinstall `onnxruntime`
 - [X] Fix memory leak when switching checkpoints
 - [X] Restore the ability to drag-and-drop images onto `gr.Image` that already contains image
 - [X] Speed up launch time
@@ -221,6 +237,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Optimize certain operations in `Spandrel`
 - [X] Optimize certain operations for `VAE`
 - [X] Speed up model loading
+- [X] Streamline model sorting
 - [X] Improve color correction
 - [X] Improve memory management
 - [X] Unload all models on `OutOfMemory`
@@ -234,6 +251,9 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Revamp settings
     - improve formatting
     - update descriptions
+- [X] Revamp extensions
+    - improve formatting
+    - now pull from 3rd-party index
 - [X] Check for Extension updates in parallel
 - [X] Move `embeddings` folder into `models` folder
 - [X] Infotext Rewrite
@@ -258,6 +278,8 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - faster image processing
 - [X] Update `protobuf`
     - faster `insightface` loading
+- [X] Update `gguf`
+    - support new quant types
 - [X] Update to latest PyTorch
     - `torch==2.14.0+cu130`
 
@@ -342,10 +364,17 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 
 <br>
 
+- `--disable-preset`: Remove the specified Preset(s) from the dropdown and settings
+- `--sort-preset`: Sort the Preset dropdown alphabetically
+
+<br>
+
 - `--use-ck-attention`: Use the Comfy-Kitchen attention to speed up generation
     - override other attention packages
 - `--enable-triton-backend`: Enable the use of Triton backend in `comfy-kitchen`
     - *might* speed up inference
+- `--force-w4a8`: Always load `convrot_w4a4` models in `w4a8` format instead
+    - improve quality
 - `--pynvml`: Use the NVIDIA Management Library to determine the actual amount of free VRAM
     - prevent system freeze when running other programs
 
@@ -398,7 +427,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 > [!Tip]
 > - For **AMD**, refer to <a href="https://github.com/CS1o/Stable-Diffusion-Info/wiki/Webui-Installation-Guides#amd-forge-neo-with-rocm"><ins>CS1o</ins> 's Guide</a>
 > - For **Linux** and **macOS**, refer to [Wiki](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Unix)
-> - For **Docker** (`Nvidia`), refer to [Docker](docker/)
+> - For **Docker** (`Nvidia` / `AMD`), refer to [Docker](docker/)
 
 <br>
 

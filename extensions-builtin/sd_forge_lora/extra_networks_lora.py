@@ -13,13 +13,9 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
 
     def __init__(self):
         super().__init__("lora")
-
         self.errors = {}
-        """mapping of network names to the number of errors the network had during operation"""
 
     def activate(self, p: "StableDiffusionProcessing", params_list: list["extra_networks.ExtraNetworkParams"]):
-        self.errors.clear()
-
         additional: str = shared.opts.sd_lora
         if additional != "None" and additional in networks.available_networks and not any(x for x in params_list if x.items[0] == additional):
             p.all_prompts = [x + f"<lora:{additional}:{shared.opts.extra_networks_default_multiplier}>" for x in p.all_prompts]
@@ -43,7 +39,8 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
             te_multipliers.append(te_multiplier)
             unet_multipliers.append(unet_multiplier)
 
-        networks.load_networks(names, te_multipliers, unet_multipliers)
+        self.errors.update({name: networks.failed_networks[name] for name in names if name in networks.failed_networks})
+        self.errors.update(networks.load_networks(names, te_multipliers, unet_multipliers))
 
         if shared.opts.lora_add_hashes_to_infotext:
             if not getattr(p, "is_hr_pass", False) or not hasattr(p, "lora_hashes"):
@@ -58,5 +55,7 @@ class ExtraNetworkLora(extra_networks.ExtraNetwork):
 
     def deactivate(self, p: "StableDiffusionProcessing"):
         if self.errors:
-            p.comment("Networks with errors: " + ", ".join(f"{k} ({v})" for k, v in self.errors.items()))
+            summary = ", ".join(f"{k} ({v})" for k, v in self.errors.items())
+            networks.logger.warning(f"Skipped LoRAs: {summary}")
+            p.comment(f"LoRAs with Error: {summary}")
             self.errors.clear()

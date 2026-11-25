@@ -418,10 +418,17 @@ function updateInput(target) {
     target.dispatchEvent(e);
 }
 
-function selectCheckpoint(name) {
+function selectCheckpoint(name, vaeTE) {
     const input = gradioApp().getElementById("change_checkpoint_text").querySelector("textarea");
     input.value = name;
     updateInput(input);
+
+    if (vaeTE) {
+        const modules = gradioApp().getElementById("change_modules_text").querySelector("textarea");
+        modules.value = JSON.stringify(vaeTE);
+        updateInput(modules);
+    }
+
     gradioApp().getElementById("change_checkpoint").click();
 }
 
@@ -430,7 +437,9 @@ function currentImg2imgSourceResolution(w, h, r) {
     if (!img) return [0, 0, r];
     const width = img.naturalWidth || img.width;
     const height = img.naturalHeight || img.height;
-    return [width, height, r];
+    const _step = parseInt(opts.res_step);
+
+    return [sRound(width, _step), sRound(height, _step), r];
 }
 
 function updateImg2imgResizeToTextAfterChangingImage() {
